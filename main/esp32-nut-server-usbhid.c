@@ -1185,8 +1185,8 @@ static void __attribute__((unused)) configure_led(void)
 }
 
 // WiFi Configuration - Layer 1: Reliable WiFi Connection
-#define WIFI_SSID "OsoNet"
-#define WIFI_PASSWORD "180219771802"
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 #define WIFI_MAXIMUM_RETRY 5
 #define WIFI_RECONNECT_DELAY_MS 5000
 
