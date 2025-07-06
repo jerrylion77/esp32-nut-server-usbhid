@@ -466,9 +466,156 @@ void tcp_server_task(void *pvParameters)
                     close(sock[i]);
                     sock[i] = INVALID_SOCK;
                 } else if (len > 0) {
+                    // NUT protocol command parsing
+                    rx_buffer[len] = '\0'; // Null-terminate for string ops
                     ESP_LOGI(TAG, "[NUT] RX from client: %.*s", len, rx_buffer);
-                    // For now, always respond with a simple placeholder
-                    const char *response = "OK\n";
+
+                    // Trim trailing CR/LF
+                    char *cmd = rx_buffer;
+                    while (len > 0 && (cmd[len-1] == '\n' || cmd[len-1] == '\r')) {
+                        cmd[--len] = '\0';
+                    }
+
+                    const char *response = NULL;
+                    char response_buf[1024];
+                    response_buf[0] = '\0';
+
+                    // Check UPS availability
+                    bool ups_found = (ups_state != UPS_DISCONNECTED && ups_state != UPS_CONNECTED_WAITING_DATA);
+
+                    // LIST UPS
+                    if (strcasecmp(cmd, "LIST UPS") == 0) {
+                        if (ups_found) {
+                            snprintf(response_buf, sizeof(response_buf),
+                                "BEGIN LIST UPS\nUPS VP700ELCD \"CyberPower VP700ELCD\"\nEND LIST UPS\n");
+                        } else {
+                            snprintf(response_buf, sizeof(response_buf), "ERR UPS-NOT-FOUND\n");
+                        }
+                        response = response_buf;
+                    }
+                    // LIST VAR VP700ELCD
+                    else if (strncasecmp(cmd, "LIST VAR VP700ELCD", 18) == 0) {
+                        if (ups_found) {
+                            // Return all 17 UPS variables
+                            snprintf(response_buf, sizeof(response_buf),
+                                "BEGIN LIST VAR VP700ELCD\n"
+                                "VAR VP700ELCD battery.charge \"%d\"\n"
+                                "VAR VP700ELCD battery.runtime \"%d\"\n"
+                                "VAR VP700ELCD input.voltage \"%d\"\n"
+                                "VAR VP700ELCD output.voltage \"%d\"\n"
+                                "VAR VP700ELCD ups.load \"%d\"\n"
+                                "VAR VP700ELCD ups.status \"%s\"\n"
+                                "VAR VP700ELCD battery.temperature \"%d\"\n"
+                                "VAR VP700ELCD device.mfr \"CyberPower\"\n"
+                                "VAR VP700ELCD device.model \"VP700ELCD\"\n"
+                                "VAR VP700ELCD device.type \"ups\"\n"
+                                "VAR VP700ELCD ups.firmware \"1.0\"\n"
+                                "VAR VP700ELCD battery.type \"PbAc\"\n"
+                                "VAR VP700ELCD ups.power.nominal \"700\"\n"
+                                "VAR VP700ELCD ups.status.flags \"%d\"\n"
+                                "VAR VP700ELCD ups.system.status \"%d\"\n"
+                                "VAR VP700ELCD ups.extended.status \"%d\"\n"
+                                "VAR VP700ELCD ups.alarm.control \"%d\"\n"
+                                "VAR VP700ELCD ups.beep.control \"%d\"\n"
+                                "END LIST VAR VP700ELCD\n",
+                                ups_data.battery_level,
+                                ups_data.runtime,
+                                ups_data.input_voltage,
+                                ups_data.output_voltage,
+                                ups_data.load,
+                                ups_available ? "OL" : "UNKNOWN",
+                                ups_data.temperature,
+                                ups_data.status,
+                                ups_data.system_status,
+                                ups_data.extended_status,
+                                ups_data.alarm_control,
+                                ups_data.beep_control);
+                        } else {
+                            snprintf(response_buf, sizeof(response_buf), "ERR UPS-NOT-FOUND\n");
+                        }
+                        response = response_buf;
+                    }
+                    // GET VAR VP700ELCD <varname>
+                    else if (strncasecmp(cmd, "GET VAR VP700ELCD ", 18) == 0) {
+                        if (ups_found) {
+                            char *var = cmd + 18;
+                            if (strcasecmp(var, "battery.charge") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD battery.charge \"%d\"\n", ups_data.battery_level);
+                            } else if (strcasecmp(var, "battery.runtime") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD battery.runtime \"%d\"\n", ups_data.runtime);
+                            } else if (strcasecmp(var, "input.voltage") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD input.voltage \"%d\"\n", ups_data.input_voltage);
+                            } else if (strcasecmp(var, "output.voltage") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD output.voltage \"%d\"\n", ups_data.output_voltage);
+                            } else if (strcasecmp(var, "ups.load") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.load \"%d\"\n", ups_data.load);
+                            } else if (strcasecmp(var, "ups.status") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.status \"%s\"\n", ups_available ? "OL" : "UNKNOWN");
+                            } else if (strcasecmp(var, "battery.temperature") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD battery.temperature \"%d\"\n", ups_data.temperature);
+                            } else if (strcasecmp(var, "device.mfr") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD device.mfr \"CyberPower\"\n");
+                            } else if (strcasecmp(var, "device.model") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD device.model \"VP700ELCD\"\n");
+                            } else if (strcasecmp(var, "device.type") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD device.type \"ups\"\n");
+                            } else if (strcasecmp(var, "ups.firmware") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.firmware \"1.0\"\n");
+                            } else if (strcasecmp(var, "battery.type") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD battery.type \"PbAc\"\n");
+                            } else if (strcasecmp(var, "ups.power.nominal") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.power.nominal \"700\"\n");
+                            } else if (strcasecmp(var, "ups.status.flags") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.status.flags \"%d\"\n", ups_data.status);
+                            } else if (strcasecmp(var, "ups.system.status") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.system.status \"%d\"\n", ups_data.system_status);
+                            } else if (strcasecmp(var, "ups.extended.status") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.extended.status \"%d\"\n", ups_data.extended_status);
+                            } else if (strcasecmp(var, "ups.alarm.control") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.alarm.control \"%d\"\n", ups_data.alarm_control);
+                            } else if (strcasecmp(var, "ups.beep.control") == 0) {
+                                snprintf(response_buf, sizeof(response_buf),
+                                    "VAR VP700ELCD ups.beep.control \"%d\"\n", ups_data.beep_control);
+                            } else {
+                                snprintf(response_buf, sizeof(response_buf), "ERR VAR-NOT-FOUND\n");
+                            }
+                        } else {
+                            snprintf(response_buf, sizeof(response_buf), "ERR UPS-NOT-FOUND\n");
+                        }
+                        response = response_buf;
+                    }
+                    // Authentication commands (stubbed for Home Assistant compatibility)
+                    else if (str_startswith(cmd, "USERNAME") || str_startswith(cmd, "PASSWORD") || str_startswith(cmd, "LOGIN")) {
+                        snprintf(response_buf, sizeof(response_buf), "OK\n");
+                        response = response_buf;
+                    }
+                    else if (str_startswith(cmd, "LOGOUT")) {
+                        snprintf(response_buf, sizeof(response_buf), "OK Goodbye\n");
+                        response = response_buf;
+                    }
+                    // Unknown command
+                    else {
+                        snprintf(response_buf, sizeof(response_buf), "ERR UNKNOWN-COMMAND\n");
+                        response = response_buf;
+                    }
+
                     int sent = send(sock[i], response, strlen(response), 0);
                     ESP_LOGI(TAG, "[sock=%d]: Sent response (%d bytes): %s", sock[i], sent, response);
                     if (sent < 0) {
@@ -771,7 +918,7 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
         {
             // Only process data if device is confirmed as UPS
             if (device_is_ups && hid_device_handle == current_device_handle) {
-                hid_host_generic_report_callback(data, data_length);
+            hid_host_generic_report_callback(data, data_length);
             }
         }
 
@@ -786,7 +933,7 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
         }
         
         if (hid_device_handle == latest_hid_device_handle) {
-            UPS_DEV_CONNECTED = false;
+        UPS_DEV_CONNECTED = false;
             ups_state = UPS_DISCONNECTED;
             ups_available = false;
             ESP_LOGI(TAG, "UPS state: -> DISCONNECTED");
