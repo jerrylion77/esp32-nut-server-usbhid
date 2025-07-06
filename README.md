@@ -12,8 +12,9 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 2. **Accurately reads USB HID data** from CyberPower UPS devices ✅
 3. **Implements proper CyberPower HID protocol** based on official MIB specifications ✅
 4. **Provides stable NUT server** for Home Assistant integration ✅
-5. **Includes modular LED status system** for visual feedback (planned)
-6. **Maintains clean, maintainable code** with proper error handling ✅
+5. **Includes modular LED status system** for visual feedback ✅
+6. **Webserver for basic configuration and remote monitoring** (planned)
+7. **Maintains clean, maintainable code** with proper error handling ✅
 
 ## 🔧 **Key Improvements Over Original**
 
@@ -72,6 +73,10 @@ The LED automatically updates based on WiFi connection status and UPS data fresh
 
 ```
 ┌─────────────────────────────────────┐
+│ 7. Webserver (planned)              │
+├─────────────────────────────────────┤
+│ 6. LED Status System ✅             │
+├─────────────────────────────────────┤
 │ 5. Home Assistant Integration ✅     │
 ├─────────────────────────────────────┤
 │ 4. NUT Server (TCP/3493) ✅         │
@@ -105,6 +110,7 @@ The LED automatically updates based on WiFi connection status and UPS data fresh
 - [x] Home Assistant integration
 - [x] LED status system
 - [x] Production optimization
+- [ ] Webserver for configuration and monitoring
 
 ## 🔧 **Setup Instructions**
 
