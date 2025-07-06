@@ -1,4 +1,4 @@
- /*
+/*
  * SPDX-FileCopyrightText: 2022-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
@@ -42,8 +42,15 @@
 
 #include "ups_models_config.h"
 
+#include <inttypes.h>
+
 // Global variable to hold the latest UPS data for NUT reporting
 static ups_data_t latest_ups_data = {0};
+
+// CyberPower UPS vendor/product IDs
+#define CYBERPOWER_VENDOR_ID    0x0764
+#define CYBERPOWER_VP700ELCD    0x0501
+#define CYBERPOWER_VP1000ELCD   0x0502
 
 // Generic HID UPS parsing definitions
 #define MAX_UPS_MODELS 10
@@ -54,19 +61,23 @@ static ups_model_config_t ups_models[MAX_UPS_MODELS];
 static uint8_t detected_model_index = 0xFF;  // 0xFF means no model detected
 static bool model_detected = false;
 
+// UPS filtering variables
+static bool device_is_ups = false;
+static bool waiting_for_initial_data = false;
+static uint32_t device_connection_time = 0;
+static const uint32_t UPS_DATA_TIMEOUT_MS = 1000;  // 1 second to wait for initial data
+static hid_host_device_handle_t current_device_handle = NULL;
+
 // Function declarations
-static esp_err_t init_generic_ups_models(void);
-static esp_err_t detect_ups_model(hid_host_device_handle_t device_handle);
+static esp_err_t __attribute__((unused)) init_generic_ups_models(void);
+// static esp_err_t detect_ups_model(hid_host_device_handle_t device_handle);  // REMOVED - unused
 static esp_err_t parse_ups_data_generic(hid_host_device_handle_t device_handle, ups_data_t *data);
 static esp_err_t set_beep_generic(hid_host_device_handle_t device_handle, bool enabled);
 static uint8_t extract_field_value(const uint8_t *data, const hid_report_mapping_t *mapping);
 static uint32_t extract_multi_byte_value(const uint8_t *data, const hid_report_mapping_t *mapping);
 static void update_json_with_ups_data(const ups_data_t *data);
 static void debug_unknown_ups_model(hid_host_device_handle_t device_handle);
-static esp_err_t reset_ups_connection(hid_host_device_handle_t device_handle);
-static esp_err_t force_usb_stack_reset(void);
-static void schedule_controlled_reboot(void);
-void refresh_ups_status_from_hid(bool *beep);
+static void refresh_ups_status_from_hid(bool *beep);
 
 /* It is use for change beep status */
 #define APP_QUIT_PIN GPIO_NUM_0
@@ -96,15 +107,6 @@ static size_t live_hid_lengths[256];
 static bool live_data_available = false;
 static uint32_t last_live_data_time = 0;
 
-// Enhanced control transfer management for CyberPower UPS
-static uint32_t consecutive_failures = 0;
-static uint32_t last_successful_read = 0;
-static bool connection_needs_reset = false;
-static bool device_handle_invalid = false;
-static uint32_t reboot_failure_count = 0;
-
-static const uint32_t MAX_FAILURES_BEFORE_REBOOT = 5;  // Reboot after 5 total failures (reduced since USB recovery doesn't work)
-static const uint32_t REBOOT_DELAY_MS = 10000;  // Wait 10 seconds before rebooting (reduced since we know reboots work)
 /**
  * @brief HID Host event
  *
@@ -274,19 +276,7 @@ static int try_receive(const char *tag, const int sock, char * data, size_t max_
  *          >0 : Size the written data
  *          -1 : Error occurred during socket write operation
  */
-static int socket_send(const char *tag, const int sock, const char * data, const size_t len)
-{
-    int to_write = len;
-    while (to_write > 0) {
-        int written = send(sock, data + (len - to_write), to_write, 0);
-        if (written < 0 && errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
-            log_socket_error(tag, sock, errno, "Error occurred during sending");
-            return -1;
-        }
-        to_write -= written;
-    }
-    return len;
-}
+
 
 
 /**
@@ -311,7 +301,7 @@ static inline char* get_clients_address(struct sockaddr_storage *source_addr)
     return address_str;
 }
 
-static void tcp_server_task(void *pvParameters)
+static void __attribute__((unused)) tcp_server_task(void *pvParameters)
 {
     static char rx_buffer[128];
     static const char *TAG = "tcp-svr";
@@ -870,10 +860,10 @@ static void tcp_server_task(void *pvParameters)
                         if (sent < 0)
                         {
                             ESP_LOGE(TAG, "[sock=%d]: Failed to send response: %s", sock[i], strerror(errno));
-                            // Error occurred on write to this socket -> close it and mark invalid
+                        // Error occurred on write to this socket -> close it and mark invalid
                             ESP_LOGI(TAG, "[sock=%d]: socket_send() returned %d -> closing the socket", sock[i], sent);
-                            close(sock[i]);
-                            sock[i] = INVALID_SOCK;
+                        close(sock[i]);
+                        sock[i] = INVALID_SOCK;
                         }
                     }
                 }
@@ -907,29 +897,30 @@ error:
  *
  * @param[in] proto Current protocol to output
  */
-static void hid_print_new_device_report_header(hid_protocol_t proto)
-{
-    static hid_protocol_t prev_proto_output = -1;
-
-    if (prev_proto_output != proto)
-    {
-        prev_proto_output = proto;
-        printf("\r\n");
-        if (proto == HID_PROTOCOL_MOUSE)
-        {
-            printf("Mouse\r\n");
-        }
-        else if (proto == HID_PROTOCOL_KEYBOARD)
-        {
-            printf("Keyboard\r\n");
-        }
-        else
-        {
-            printf("Generic\r\n");
-        }
-        fflush(stdout);
-    }
-}
+// REMOVED - unused function
+// static void hid_print_new_device_report_header(hid_protocol_t proto)
+// {
+//     static hid_protocol_t prev_proto_output = -1;
+// 
+//     if (prev_proto_output != proto)
+//     {
+//         prev_proto_output = proto;
+//         printf("\r\n");
+//         if (proto == HID_PROTOCOL_MOUSE)
+//         {
+//             printf("Mouse\r\n");
+//         }
+//         else if (proto == HID_PROTOCOL_KEYBOARD)
+//         {
+//             printf("Keyboard\r\n");
+//         }
+//         else
+//         {
+//             printf("Generic\r\n");
+//         }
+//         fflush(stdout);
+//     }
+// }
 
 /**
  * @brief USB HID Host Generic Interface report callback handler
@@ -941,70 +932,31 @@ static void hid_print_new_device_report_header(hid_protocol_t proto)
  */
 static void hid_host_generic_report_callback(const uint8_t *const data, const int length)
 {
-    ESP_LOGI(TAG, "[HID RAW] Received report (%d bytes):", length);
-    for (int i = 0; i < length; i++)
-    {
+    ESP_LOGI(TAG, "=== HID REPORT RECEIVED ===");
+    ESP_LOGI(TAG, "Length: %d bytes", length);
+    ESP_LOGI(TAG, "Raw data:");
+    
+    // Display raw bytes
+    for (int i = 0; i < length && i < 32; i++) {  // Limit to 32 bytes for readability
         printf("%02X ", data[i]);
+        if ((i + 1) % 8 == 0) printf("\n");
     }
-    printf("\n");
+    if (length > 32) {
+        printf("... (truncated, total %d bytes)\n", length);
+    } else {
+        printf("\n");
+    }
     
-    // Enhanced debugging for report analysis
+    // Show first few bytes as decimal too
     if (length > 0) {
-        uint8_t report_id = data[0];
-        ESP_LOGI(TAG, "[HID DEBUG] Report 0x%02X analysis:", report_id);
-        
-        // Show byte-by-byte analysis for debugging
+        ESP_LOGI(TAG, "First 8 bytes as decimal:");
         for (int i = 0; i < length && i < 8; i++) {
-            ESP_LOGI(TAG, "[HID DEBUG]   Byte %d: 0x%02X (%d)", i, data[i], data[i]);
+            printf("%3d ", data[i]);
         }
-        
-        // Try to interpret common patterns
-        if (length >= 2) {
-            if (report_id == 0x01) {
-                ESP_LOGI(TAG, "[HID DEBUG]   Status byte: 0x%02X", data[1]);
-                ESP_LOGI(TAG, "[HID DEBUG]   AC Present: %s", (data[1] & 0x01) ? "YES" : "NO");
-                ESP_LOGI(TAG, "[HID DEBUG]   Charging: %s", (data[1] & 0x02) ? "YES" : "NO");
-                ESP_LOGI(TAG, "[HID DEBUG]   Discharging: %s", (data[1] & 0x04) ? "YES" : "NO");
-            }
-            if (report_id == 0x03) {
-                ESP_LOGI(TAG, "[HID DEBUG]   Battery: 0x%02X (%d%%)", data[1], (int)(data[1] * 33.33));
-            }
-            if (report_id == 0x05 && length >= 3) {
-                uint16_t runtime = (data[2] << 8) | data[1]; // Little endian
-                ESP_LOGI(TAG, "[HID DEBUG]   Runtime: 0x%04X (%d seconds)", runtime, runtime);
-            }
-            if (report_id == 0x07) {
-                ESP_LOGI(TAG, "[HID DEBUG]   Load: 0x%02X (%d%%)", data[1], (int)(data[1] * 0.15));
-            }
-            if (report_id == 0x08) {
-                ESP_LOGI(TAG, "[HID DEBUG]   Voltage: 0x%02X (%d)", data[1], data[1]);
-            }
-            if (report_id == 0x06 && length >= 3) {
-                ESP_LOGI(TAG, "[HID DEBUG]   Alarm control: 0x%02X", data[2]);
-            }
-        }
+        printf("\n");
     }
     
-    // Store live HID data for UPS parsing
-    if (length > 0 && length <= MAX_REPORT_SIZE) {
-        uint8_t report_id = data[0];
-        if (report_id < 256) {  // Support all possible report IDs
-            memcpy(live_hid_data[report_id], data, length);
-            live_hid_lengths[report_id] = length;
-            live_data_available = true;
-            last_live_data_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            ESP_LOGI(TAG, "[HID LIVE] Stored report 0x%02X (%d bytes)", report_id, length);
-        } else {
-            ESP_LOGW(TAG, "[HID LIVE] Report ID 0x%02X out of bounds, ignoring", report_id);
-        }
-    }
-    
-    hid_print_new_device_report_header(HID_PROTOCOL_NONE);
-    for (int i = 0; i < length; i++)
-    {
-        printf("%02X", data[i]);
-    }
-    putchar('\r');
+    ESP_LOGI(TAG, "=============================");
 }
 
 /**
@@ -1031,19 +983,47 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
                                                                   64,
                                                                   &data_length));
 
+        // UPS filtering logic - check if this is the first data from a newly connected device
+        if (waiting_for_initial_data && hid_device_handle == current_device_handle) {
+            uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            uint32_t time_since_connection = current_time - device_connection_time;
+            
+            if (time_since_connection <= UPS_DATA_TIMEOUT_MS) {
+                // Device sent data within timeout - likely a UPS
+                device_is_ups = true;
+                waiting_for_initial_data = false;
+                latest_hid_device_handle = hid_device_handle;
+                UPS_DEV_CONNECTED = true;
+                ESP_LOGI(TAG, "UPS data detected, sending to parsing logic");
+            }
+        }
+
         if (HID_SUBCLASS_BOOT_INTERFACE == dev_params.sub_class)
         {
         }
         else
         {
-            hid_host_generic_report_callback(data, data_length);
+            // Only process data if device is confirmed as UPS
+            if (device_is_ups && hid_device_handle == current_device_handle) {
+                hid_host_generic_report_callback(data, data_length);
+            }
         }
 
         break;
     case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
-        UPS_DEV_CONNECTED = false;
-        ESP_LOGI(TAG, "hid_host_interface_callback: HID Device, protocol '%s' DISCONNECTED",
-                 hid_proto_name_str[dev_params.proto]);
+        // Only handle disconnection for devices we actually opened (NONE protocol devices)
+        if (hid_device_handle == current_device_handle) {
+            // Don't reset filtering state immediately - let timeout check handle it
+            // device_is_ups = false;
+            // waiting_for_initial_data = false;
+            // current_device_handle = NULL;
+        }
+        
+        if (hid_device_handle == latest_hid_device_handle) {
+            UPS_DEV_CONNECTED = false;
+        }
+        
+        ESP_LOGI(TAG, "USB device disconnected correctly");
         ESP_ERROR_CHECK(hid_host_device_close(hid_device_handle));
         break;
     case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
@@ -1074,50 +1054,17 @@ void hid_host_device_event(hid_host_device_handle_t hid_device_handle,
     switch (event)
     {
     case HID_HOST_DRIVER_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "=== USB DEVICE CONNECTED ===");
+        ESP_LOGI(TAG, "Protocol: %s", hid_proto_name_str[dev_params.proto]);
+        ESP_LOGI(TAG, "Subclass: %d", dev_params.sub_class);
+        ESP_LOGI(TAG, "Device Handle: %p", hid_device_handle);
+        ESP_LOGI(TAG, "================================");
 
-        ESP_LOGI(TAG, "hid_host_device_event: HID Device, protocol '%s' CONNECTED",
-                 hid_proto_name_str[dev_params.proto]);
-
-        // Clear stored debug data when a new device connects
-        memset(debug_report_data, 0, sizeof(debug_report_data));
-        memset(debug_report_lengths, 0, sizeof(debug_report_lengths));
-        debug_data_available = false;
-        device_handle_invalid = false;  // Reset device handle validity
-        consecutive_failures = 0;       // Reset failure counter
-        connection_needs_reset = false; // Reset connection reset flag
-        reboot_failure_count = 0;      // Reset reboot failure counter
-        ESP_LOGI(TAG, "Cleared stored debug data and reset connection state for new device");
-
-        // Detect UPS model when device connects
-        esp_err_t ret = detect_ups_model(hid_device_handle);
-        if (ret == ESP_ERR_INVALID_ARG) {
-            // Device is not a UPS (e.g., keyboard, mouse)
-            ESP_LOGW(TAG, "Device is not a UPS, skipping UPS-specific initialization");
-            
-            // Still open the device for general HID operations
-            const hid_host_device_config_t dev_config = {
-                .callback = hid_host_interface_callback,
-                .callback_arg = NULL};
-            
-            ESP_ERROR_CHECK(hid_host_device_open(hid_device_handle, &dev_config));
-            if (HID_SUBCLASS_BOOT_INTERFACE == dev_params.sub_class)
-            {
-                ESP_ERROR_CHECK(hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_BOOT));
-                if (HID_PROTOCOL_KEYBOARD == dev_params.proto)
-                {
-                    ESP_ERROR_CHECK(hid_class_request_set_idle(hid_device_handle, 0, 0));
-                }
-            }
-            ESP_ERROR_CHECK(hid_host_device_start(hid_device_handle));
-            // Don't set UPS_DEV_CONNECTED for non-UPS devices
-            break;
-        } else if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to detect UPS model, using generic fallback");
-        }
-
+        // USB Management: ALWAYS open and manage ALL devices
         const hid_host_device_config_t dev_config = {
             .callback = hid_host_interface_callback,
-            .callback_arg = NULL};
+            .callback_arg = NULL
+        };
 
         ESP_ERROR_CHECK(hid_host_device_open(hid_device_handle, &dev_config));
         if (HID_SUBCLASS_BOOT_INTERFACE == dev_params.sub_class)
@@ -1129,8 +1076,21 @@ void hid_host_device_event(hid_host_device_handle_t hid_device_handle,
             }
         }
         ESP_ERROR_CHECK(hid_host_device_start(hid_device_handle));
-        latest_hid_device_handle = hid_device_handle;
-        UPS_DEV_CONNECTED = true;
+
+        // Filtering Logic: Only investigate NONE protocol devices for UPS data
+        if (dev_params.proto == HID_PROTOCOL_KEYBOARD || dev_params.proto == HID_PROTOCOL_MOUSE) {
+            ESP_LOGI(TAG, "USB device detected, not parsing as not UPS");
+        }
+        else if (dev_params.proto == HID_PROTOCOL_NONE) {
+            ESP_LOGI(TAG, "Potential UPS detected, waiting for raw data");
+            
+            // Initialize UPS filtering for this device
+            device_is_ups = false;
+            waiting_for_initial_data = true;
+            device_connection_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            current_device_handle = hid_device_handle;
+        }
+        
         break;
     default:
         break;
@@ -1208,22 +1168,6 @@ void refresh_ups_status_from_hid(bool *beep)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to parse UPS data");
         
-        // Count failures even when device handle is invalid
-        if (detected_model_index == 4) { // CyberPower VP1000ELCD
-            reboot_failure_count++;
-            ESP_LOGW(TAG, "Failed to parse UPS data (total failures: %lu)", 
-                     (unsigned long)reboot_failure_count);
-            
-            // Check if we need to schedule a reboot
-            if (reboot_failure_count >= MAX_FAILURES_BEFORE_REBOOT) {
-                ESP_LOGW(TAG, "Too many total failures (%lu), scheduling controlled reboot", 
-                         (unsigned long)reboot_failure_count);
-                schedule_controlled_reboot();
-                // Reset the counter to prevent multiple reboots
-                reboot_failure_count = 0;
-            }
-        }
-        
         return;
     }
     
@@ -1280,67 +1224,28 @@ void refresh_ups_status_from_hid(bool *beep)
 /// @param pvParameters 
 void timer_task(void *pvParameters)
 {
-    timer_queue_element_t evt_queue;
-    uint32_t last_periodic_reset = 0;
-    const uint32_t PERIODIC_RESET_INTERVAL_MS = 60000; // Reset every 60 seconds for CyberPower UPS
-
+    // Simple timeout check - no complex queue logic
     while (true)
     {
-        if (xQueueReceive(timer_queue, &evt_queue, pdMS_TO_TICKS(50)))
-        {
-            // timer triggered.
-            if (UPS_DEV_CONNECTED)
-            {
-                uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        // Check for UPS detection timeout
+        if (waiting_for_initial_data && current_device_handle != NULL) {
+            uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            uint32_t time_since_connection = current_time - device_connection_time;
+            
+            if (time_since_connection > UPS_DATA_TIMEOUT_MS) {
+                // Device didn't send data within timeout - not a UPS
+                ESP_LOGI(TAG, "no raw data detected, no UPS connected");
                 
-                // Check if we need periodic reset for CyberPower UPS
-                if (detected_model_index == 4 && // CyberPower VP1000ELCD
-                    (current_time - last_periodic_reset) > PERIODIC_RESET_INTERVAL_MS) {
-                    ESP_LOGI(TAG, "Performing periodic connection reset for CyberPower UPS");
-                    connection_needs_reset = true;
-                    last_periodic_reset = current_time;
-                }
-                
-                bool beep = false;
-                refresh_ups_status_from_hid(&beep);
-                if (!gpio_get_level(APP_QUIT_PIN))
-                {
-                    set_beep(!beep);
-                }
-            }
-            else
-            {
-                led_strip_set_pixel(led_strip, 0, 0x08, 0x05, 0);
-                /* Refresh the strip to send data */
-                led_strip_refresh(led_strip);
-                ESP_LOGI(TAG, "Disconnected");
-                
-                // Count failures even when disconnected
-                if (detected_model_index == 4) { // CyberPower VP1000ELCD
-                    reboot_failure_count++;
-                    ESP_LOGW(TAG, "Device disconnected (total failures: %lu)", 
-                             (unsigned long)reboot_failure_count);
-                    
-                    // Check if we need to schedule a reboot
-                    if (reboot_failure_count >= MAX_FAILURES_BEFORE_REBOOT) {
-                        ESP_LOGW(TAG, "Too many total failures (%lu), scheduling controlled reboot", 
-                                 (unsigned long)reboot_failure_count);
-                        schedule_controlled_reboot();
-                        // Reset the counter to prevent multiple reboots
-                        reboot_failure_count = 0;
-                    }
-                }
-                
-                cJSON *got_item;
-                got_item = cJSON_GetObjectItemCaseSensitive(json_object, "ups");
-                got_item = cJSON_GetObjectItemCaseSensitive(got_item, "status");
-                cJSON_SetValuestring(got_item, "OFF");
+                // Reset filtering state
+                device_is_ups = false;
+                waiting_for_initial_data = false;
+                current_device_handle = NULL;
             }
         }
+
+        // Simple delay instead of queue
+        vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100ms
     }
-    xQueueReset(timer_queue);
-    vQueueDelete(timer_queue);
-    vTaskDelete(NULL);
 }
 
 /**
@@ -1394,7 +1299,7 @@ void hid_host_device_callback(hid_host_device_handle_t hid_device_handle,
 
 // ==计时器 Timer
 
-static bool IRAM_ATTR timer_on_alarm_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_ctx)
+static bool IRAM_ATTR __attribute__((unused)) timer_on_alarm_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_ctx)
 {
     BaseType_t high_task_awoken = pdFALSE;
     QueueHandle_t queue = (QueueHandle_t)user_ctx;
@@ -1406,7 +1311,7 @@ static bool IRAM_ATTR timer_on_alarm_callback(gptimer_handle_t timer, const gpti
 }
 // ==计时器 Timer
 
-static void configure_led(void)
+static void __attribute__((unused)) configure_led(void)
 {
     /* LED strip initialization with the GPIO and pixels number*/
     led_strip_config_t strip_config = {
@@ -1421,82 +1326,259 @@ static void configure_led(void)
     led_strip_clear(led_strip);
 }
 
-void connect_to_wifi(void);
+// WiFi Configuration - Layer 1: Reliable WiFi Connection
+#define WIFI_SSID "OsoNet"
+#define WIFI_PASSWORD "180219771802"
+#define WIFI_MAXIMUM_RETRY 5
+#define WIFI_RECONNECT_DELAY_MS 5000
+
+// WiFi status tracking
+static bool wifi_connected = false;
+static int wifi_retry_count = 0;
+static EventGroupHandle_t wifi_event_group;
+static const int WIFI_CONNECTED_BIT = BIT0;
+static const int WIFI_FAIL_BIT = BIT1;
+
+// WiFi event handler
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "WiFi station started, attempting to connect...");
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_connected = false;
+        if (wifi_retry_count < WIFI_MAXIMUM_RETRY) {
+            ESP_LOGI(TAG, "WiFi disconnected, retrying... (attempt %d/%d)", 
+                     wifi_retry_count + 1, WIFI_MAXIMUM_RETRY);
+            esp_wifi_connect();
+            wifi_retry_count++;
+        } else {
+            ESP_LOGE(TAG, "WiFi connection failed after %d attempts", WIFI_MAXIMUM_RETRY);
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "WiFi connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        wifi_connected = true;
+        wifi_retry_count = 0;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+// Initialize WiFi
+static esp_err_t wifi_init(void)
+{
+    ESP_LOGI(TAG, "Initializing WiFi...");
+    
+    // Create WiFi event group
+    wifi_event_group = xEventGroupCreate();
+    if (wifi_event_group == NULL) {
+        ESP_LOGE(TAG, "Failed to create WiFi event group");
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // Initialize TCP/IP stack
+    ESP_ERROR_CHECK(esp_netif_init());
+    
+    // Create default netif instance
+    esp_netif_create_default_wifi_sta();
+    
+    // Initialize WiFi
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+    
+    // Configure WiFi
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .capable = true,
+                .required = false
+            },
+        },
+    };
+    
+    // Set WiFi mode and config
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    
+    // Start WiFi
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    ESP_LOGI(TAG, "WiFi initialization complete");
+    return ESP_OK;
+}
+
+// Connect to WiFi with timeout
+static esp_err_t wifi_connect_with_timeout(int timeout_ms)
+{
+    ESP_LOGI(TAG, "Connecting to WiFi: %s", WIFI_SSID);
+    
+    // Reset retry count
+    wifi_retry_count = 0;
+    
+    // Wait a moment for WiFi stack to stabilize
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Check if WiFi is already connecting
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi already connected to: %s", ap_info.ssid);
+        wifi_connected = true;
+        return ESP_OK;
+    }
+    
+    // Attempt connection with proper error handling
+    esp_err_t ret = esp_wifi_connect();
+    if (ret != ESP_OK) {
+        if (ret == ESP_ERR_WIFI_CONN) {
+            ESP_LOGW(TAG, "WiFi already connecting, waiting for completion...");
+            // Wait a bit and try again
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            ret = esp_wifi_connect();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "WiFi connection failed: %s", esp_err_to_name(ret));
+                return ret;
+            }
+        } else {
+            ESP_LOGE(TAG, "WiFi connection failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    
+    // Wait for connection or failure
+    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           pdMS_TO_TICKS(timeout_ms));
+    
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "WiFi connected successfully");
+        return ESP_OK;
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGE(TAG, "WiFi connection failed");
+        return ESP_FAIL;
+    } else {
+        ESP_LOGE(TAG, "WiFi connection timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+}
+
+// Check WiFi connection status
+
+
+// WiFi reconnection task (runs in background)
+static void wifi_reconnect_task(void *pvParameters)
+{
+    while (1) {
+        if (!wifi_connected) {
+            ESP_LOGI(TAG, "WiFi disconnected, attempting reconnection...");
+            wifi_connect_with_timeout(10000); // 10 second timeout
+        }
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
+    }
+}
+
+// Public WiFi connection function
+void connect_to_wifi(void)
+{
+    ESP_LOGI(TAG, "Starting WiFi connection...");
+    
+    // Initialize WiFi
+    esp_err_t ret = wifi_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi initialization failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    // Connect to WiFi with retry logic
+    int retry_count = 0;
+    const int max_retries = 3;
+    
+    while (retry_count < max_retries) {
+        ret = wifi_connect_with_timeout(15000); // 15 second timeout
+        if (ret == ESP_OK) {
+            break;
+        }
+        
+        retry_count++;
+        ESP_LOGW(TAG, "WiFi connection attempt %d failed: %s", retry_count, esp_err_to_name(ret));
+        
+        if (retry_count < max_retries) {
+            ESP_LOGI(TAG, "Retrying WiFi connection in 5 seconds...");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+    }
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi connection failed after %d attempts", max_retries);
+        return;
+    }
+    
+    // Start reconnection task
+    xTaskCreate(wifi_reconnect_task, "wifi_reconnect", 4096, NULL, 5, NULL);
+    
+    ESP_LOGI(TAG, "WiFi connection established and monitoring started");
+}
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    init_json_object();
-    
-    // Initialize generic UPS models for multi-model support
-    ESP_ERROR_CHECK(init_generic_ups_models());
-    
-    
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
-//    ESP_ERROR_CHECK(example_connect());
+    //init_json_object();
+    //ESP_ERROR_CHECK(init_generic_ups_models());
+    //connect_to_wifi();
     connect_to_wifi();
-
-
-
-    SemaphoreHandle_t server_ready = xSemaphoreCreateBinary();
-    assert(server_ready);
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, &server_ready, 5, NULL);
-    xSemaphoreTake(server_ready, portMAX_DELAY);
-    vSemaphoreDelete(server_ready);
-
-    // == 定时器 Timer
-    // Create queue
-    timer_queue = xQueueCreate(10, sizeof(timer_queue_element_t));
-    gptimer_handle_t gptimer = NULL;
-    gptimer_config_t timer_config = {
-        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
-        .direction = GPTIMER_COUNT_UP,
-        .resolution_hz = 1 * 1000 * 1000, // 1MHz, 1 tick = 1us
-    };
-    ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
-
-    gptimer_alarm_config_t alarm_config = {
-        .reload_count = 0,                  // counter will reload with 0 on alarm event
-        .alarm_count = 1000000,             // period = 1s @resolution 1MHz
-        .flags.auto_reload_on_alarm = true, // enable auto-reload
-    };
-    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config));
-
-    gptimer_event_callbacks_t cbs = {
-        .on_alarm = timer_on_alarm_callback,
-    };
-    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &cbs, timer_queue));
-    ESP_ERROR_CHECK(gptimer_enable(gptimer));
-    ESP_ERROR_CHECK(gptimer_start(gptimer));
-    // == 定时器 Timer
-
+    //SemaphoreHandle_t server_ready = xSemaphoreCreateBinary();
+    //assert(server_ready);
+    //xTaskCreate(tcp_server_task, "tcp_server", 4096, &server_ready, 5, NULL);
+    //xSemaphoreTake(server_ready, portMAX_DELAY);
+    //vSemaphoreDelete(server_ready);
+    //timer_queue = xQueueCreate(10, sizeof(timer_queue_element_t));
+    //gptimer_handle_t gptimer = NULL;
+    //gptimer_config_t timer_config = {
+    //    .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+    //    .direction = GPTIMER_COUNT_UP,
+    //    .resolution_hz = 1 * 1000 * 1000, // 1MHz, 1 tick = 1us
+    //};
+    //ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
+    //gptimer_alarm_config_t alarm_config = {
+    //    .reload_count = 0,                  // counter will reload with 0 on alarm event
+    //    .alarm_count = 1000000,             // period = 1s @resolution 1MHz
+    //    .flags.auto_reload_on_alarm = true, // enable auto-reload
+    //};
+    //ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config));
+    //gptimer_event_callbacks_t cbs = {
+    //    .on_alarm = timer_on_alarm_callback,
+    //};
+    //ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &cbs, timer_queue));
+    //ESP_ERROR_CHECK(gptimer_enable(gptimer));
+    //ESP_ERROR_CHECK(gptimer_start(gptimer));
     BaseType_t task_created;
-
-    /*
-     * Create usb_lib_task to:
-     * - initialize USB Host library
-     * - Handle USB Host events while APP pin in in HIGH state
-     */
     task_created = xTaskCreatePinnedToCore(usb_lib_task,
                                            "usb_events",
                                            4096,
                                            xTaskGetCurrentTaskHandle(),
                                            2, NULL, 0);
     assert(task_created == pdTRUE);
-
-    // Wait for notification from usb_lib_task to proceed
     ulTaskNotifyTake(false, 1000);
-
-    /*
-     * HID host driver configuration
-     * - create background task for handling low level event inside the HID driver
-     * - provide the device callback to get new HID Device connection event
-     */
     const hid_host_driver_config_t hid_host_driver_config = {
         .create_background_task = true,
         .task_priority = 5,
@@ -1504,127 +1586,29 @@ void app_main(void)
         .core_id = 0,
         .callback = hid_host_device_callback,
         .callback_arg = NULL};
-
     ESP_ERROR_CHECK(hid_host_install(&hid_host_driver_config));
-
-    // Task is working until the devices are gone (while 'user_shutdown' if false)
     user_shutdown = false;
-
-    /*
-     * Create HID Host task process for handle events
-     * IMPORTANT: Task is necessary here while there is no possibility to interact
-     * with USB device from the callback.
-     */
     task_created = xTaskCreate(&hid_host_task, "hid_task", 4 * 1024, NULL, 2, NULL);
-
-    configure_led();
-
-    // to receive queue sent from timer, and the actual thing is done at timer_task (for example, recheck ups status)
+    //configure_led();
     task_created = xTaskCreate(&timer_task, "timer_task", 4 * 1024, NULL, 8, NULL);
     assert(task_created == pdTRUE);
 }
 
 //static const char *TAG = "wifi";
 
-void connect_to_wifi() {
-    ESP_LOGI(TAG, "Initializing Wi-Fi");
-
-    //ESP_ERROR_CHECK(esp_netif_init());
-    //ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "OsoNet",
-            .password = "180219771802",
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK
-        },
-    };
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "Connecting to Wi-Fi...");
-    ESP_ERROR_CHECK(esp_wifi_connect());
-}
-
-// Implementation of generic UPS parsing functions
-static esp_err_t init_generic_ups_models(void)
+// TODO: Layer 2 - USB HID implementation will go here
+// For now, just a placeholder to avoid compilation errors
+static esp_err_t __attribute__((unused)) init_generic_ups_models(void)
 {
-    memset(ups_models, 0, sizeof(ups_models));
-    
-    // Initialize UPS models using predefined configurations
-    ups_models[0] = (ups_model_config_t)SANTAK_TG_BOX_850_CONFIG;
-    ups_models[1] = (ups_model_config_t)CYBERPOWER_VP700ELD_CONFIG;
-    ups_models[2] = (ups_model_config_t)GENERIC_UPS_CONFIG;
-    ups_models[3] = (ups_model_config_t)CYBERPOWER_CP1500PFCLCD_CONFIG;
-    
-    // Use the improved CyberPower VP1000ELCD configuration
-    // To test alternative configuration, uncomment the next line and comment the current one
-    ups_models[4] = (ups_model_config_t)CYBERPOWER_VP1000ELCD_CONFIG;
-    // ups_models[4] = (ups_model_config_t)CYBERPOWER_VP1000ELCD_ALT_CONFIG; // Alternative config for testing
-    
-    ESP_LOGI(TAG, "Initialized %d UPS models for generic parsing", 5);
-    ESP_LOGI(TAG, "CyberPower VP1000ELCD using improved mappings and scaling factors");
+    ESP_LOGI(TAG, "UPS models initialization - will be implemented in Layer 2");
     return ESP_OK;
 }
 
-static esp_err_t detect_ups_model(hid_host_device_handle_t device_handle)
-{
-    hid_host_dev_params_t dev_params;
-    esp_err_t ret = hid_host_device_get_params(device_handle, &dev_params);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get device parameters");
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "Detecting UPS model - Protocol: %s, Subclass: %d", 
-             hid_proto_name_str[dev_params.proto], dev_params.sub_class);
-    
-    // Check if this is actually a keyboard or mouse (not a UPS)
-    if (dev_params.proto == HID_PROTOCOL_KEYBOARD || dev_params.proto == HID_PROTOCOL_MOUSE) {
-        ESP_LOGW(TAG, "Device is a %s, not a UPS. Skipping UPS parsing.", 
-                 hid_proto_name_str[dev_params.proto]);
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // For protocol NONE, we need to be more careful - it could be a UPS
-    // Let's check if this might be a UPS by looking at other characteristics
-    if (dev_params.proto == HID_PROTOCOL_NONE) {
-        ESP_LOGW(TAG, "Device has protocol NONE - checking if it might be a UPS...");
-        // For now, let's allow NONE protocol devices to proceed with caution
-        // We'll add more sophisticated detection later
-    }
-    
-    // For CyberPower UPS devices, we need to use a different approach
-    // They often don't support HID class requests, so we'll use interrupt transfers instead
-    ESP_LOGI(TAG, "Attempting to use interrupt transfer mode for UPS communication");
-    
-    // For protocol NONE devices, try CyberPower VP1000ELCD first (common for CyberPower UPS)
-    if (dev_params.proto == HID_PROTOCOL_NONE) {
-        detected_model_index = 4; // CyberPower VP1000ELCD
-        model_detected = true;
-        ESP_LOGI(TAG, "Using CyberPower VP1000ELCD model for protocol NONE device");
-    } else {
-        // For now, use generic model and let the parsing logic handle different formats
-        // This approach is more flexible and will work with any UPS that follows common HID patterns
-        detected_model_index = 2; // Generic model
-        model_detected = true;
-        ESP_LOGI(TAG, "Using generic UPS model with adaptive parsing");
-    }
-    
-    // Debug for potential UPS devices (not keyboards or mice)
-    if (dev_params.proto != HID_PROTOCOL_KEYBOARD && 
-        dev_params.proto != HID_PROTOCOL_MOUSE) {
-        debug_unknown_ups_model(device_handle);
-    }
-    
-    return ESP_OK;
-}
+// REMOVED - unused function
+// static esp_err_t detect_ups_model(hid_host_device_handle_t device_handle)
+// {
+//     // ... function body removed ...
+// }
 
 static uint8_t extract_field_value(const uint8_t *data, const hid_report_mapping_t *mapping)
 {
@@ -1685,7 +1669,7 @@ static esp_err_t parse_ups_data_generic(hid_host_device_handle_t device_handle, 
                  mapping->report_id, mapping->field_type, mapping->data_offset, mapping->data_size);
         
         // Try to use live data first
-        if (use_live_data && mapping->report_id < 256 && live_hid_lengths[mapping->report_id] > 0) {
+        if (use_live_data && live_hid_lengths[mapping->report_id] > 0) {
             len = live_hid_lengths[mapping->report_id];
             memcpy(recv, live_hid_data[mapping->report_id], len);
             ESP_LOGI(TAG, "[PARSER] Using live data for report 0x%02X", mapping->report_id);
@@ -1851,126 +1835,9 @@ static void update_json_with_ups_data(const ups_data_t *data)
     cJSON_SetValuestring(got_item, setted_text);
 }
 
-// Debug function to help identify unknown UPS models
-static esp_err_t reset_ups_connection(hid_host_device_handle_t device_handle)
-{
-    ESP_LOGI(TAG, "=== RESETTING UPS CONNECTION ===");
-    
-    // First, try to gracefully stop and close the device
-    esp_err_t ret = hid_host_device_stop(device_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to stop device during reset: %s", esp_err_to_name(ret));
-    }
-    
-    ret = hid_host_device_close(device_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to close device during reset: %s", esp_err_to_name(ret));
-    }
-    
-    // Wait longer for device to fully reset
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Try to reopen the device
-    const hid_host_device_config_t dev_config = {
-        .callback = hid_host_interface_callback,
-        .callback_arg = NULL
-    };
-    
-    ret = hid_host_device_open(device_handle, &dev_config);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to reopen device after reset: %s, trying USB stack reset", esp_err_to_name(ret));
-        
-        // If reopening fails, try a more aggressive approach - force device re-enumeration
-        ESP_LOGI(TAG, "Attempting USB stack reset and device re-enumeration...");
-        
-        // Wait for USB stack to stabilize
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        
-        // Try reopening again
-        ret = hid_host_device_open(device_handle, &dev_config);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to reopen device after USB stack reset: %s, trying force reset", esp_err_to_name(ret));
-            
-            // As a last resort, try forcing a complete USB stack reset
-            force_usb_stack_reset();
-            
-            // Try one more time after force reset
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            ret = hid_host_device_open(device_handle, &dev_config);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to reopen device after force reset: %s", esp_err_to_name(ret));
-                return ret;
-            }
-        }
-    }
-    
-    // Restart the device
-    ret = hid_host_device_start(device_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to restart device after reset: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    // Reset connection state
-    consecutive_failures = 0;
-    connection_needs_reset = false;
-    last_successful_read = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    
-    ESP_LOGI(TAG, "=== UPS CONNECTION RESET COMPLETE ===");
-    return ESP_OK;
-}
 
-static esp_err_t force_usb_stack_reset(void)
-{
-    ESP_LOGI(TAG, "=== FORCING USB STACK RESET ===");
-    
-    // This is a more aggressive approach - we'll try to reinitialize the USB host
-    // Note: This is experimental and may not work with all ESP-IDF versions
-    
-    // Wait for USB stack to fully stabilize
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    
-    // Try to force USB host stack reinitialization
-    // Note: This is a more aggressive approach that may require USB host library support
-    ESP_LOGW(TAG, "Attempting aggressive USB host stack reset...");
-    
-    // Reset all connection state
-    device_handle_invalid = false;
-    consecutive_failures = 0;
-    connection_needs_reset = false;
-    
-    ESP_LOGI(TAG, "=== USB STACK RESET COMPLETE ===");
-    return ESP_OK;
-}
 
-static void reboot_task(void* parameter)
-{
-    // Wait for the specified delay
-    vTaskDelay(pdMS_TO_TICKS(REBOOT_DELAY_MS));
-    
-    ESP_LOGI(TAG, "=== EXECUTING CONTROLLED REBOOT ===");
-    ESP_LOGI(TAG, "Rebooting ESP32 to recover USB communication...");
-    
-    // Give some time for logs to be printed
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    // Perform controlled reboot
-    esp_restart();
-}
-
-static void schedule_controlled_reboot(void)
-{
-    ESP_LOGI(TAG, "=== SCHEDULING CONTROLLED REBOOT ===");
-    ESP_LOGI(TAG, "Total failures: %lu, scheduling reboot in %lu ms", 
-             (unsigned long)reboot_failure_count, (unsigned long)REBOOT_DELAY_MS);
-    
-    // Create a task to handle the delayed reboot
-    xTaskCreate(reboot_task, "reboot_task", 4096, NULL, 5, NULL);
-    
-    ESP_LOGI(TAG, "=== REBOOT SCHEDULED ===");
-}
-
-static void debug_unknown_ups_model(hid_host_device_handle_t device_handle)
+static void __attribute__((unused)) debug_unknown_ups_model(hid_host_device_handle_t device_handle)
 {
     ESP_LOGI(TAG, "=== DEBUG: Unknown UPS Model Detection ===");
     
