@@ -4,90 +4,76 @@
 
 A specialized ESP32-S3 firmware designed to communicate with **CyberPower UPS models** (specifically VP700ELCD/VP1000ELCD) via USB-HID and act as a NUT (Network UPS Tools) server for seamless Home Assistant integration.
 
-## 🎯 **Project Goals**
+---
 
-This fork focuses on creating a **reliable, efficient, and CyberPower-optimized** ESP32 firmware that:
+## 🚦 Project Status (May 2024)
 
-1. **Reliably connects to WiFi** with automatic reconnection
-2. **Accurately reads USB HID data** from CyberPower UPS devices
-3. **Implements proper CyberPower HID protocol** based on official MIB specifications
-4. **Provides stable NUT server** for Home Assistant integration
-5. **Includes modular LED status system** for visual feedback
-6. **Maintains clean, maintainable code** with proper error handling
+- **Stable HID parsing for CyberPower VP1000ELCD** (and likely VP700ELCD)
+- **Queue size increased** for better burst handling (20 events)
+- **Verbose logging control** via compile-time flag
+- **Clean build, no warnings**
+- **Ready for NUT server integration**
+- **VP700ELCD**: Similar report structure, but data scaling/interpretation not fully mapped
 
-## 🔧 **Key Improvements Over Original**
+---
 
-- **CyberPower-specific HID parsing** using official MIB documentation
-- **Single data flow architecture** (no dual data systems)
-- **Proper error handling** and fail-safe device detection
-- **Modular debugging system** for development and production
-- **Accurate data scaling** based on CyberPower specifications
-- **Reliable WiFi reconnection** handling
-- **Clean, maintainable codebase** with systematic refactoring
+## ⚠️ Current Limitations
 
-## 🎨 **LED Status System (Planned)**
+- **Data accuracy for CyberPower UPS models is not fully solved**
+    - Some fields (load, runtime, status flags) are raw values, not yet reverse engineered
+    - Scaling and field mapping for some values are not fully understood
+- **No official CyberPower HID documentation available**
+- **NUT server integration is in progress**
 
-The firmware will include a modular LED status system that can be called to change colors based on system state:
+---
 
-- **Green**: UPS connected and healthy
-- **Orange**: UPS disconnected
-- **Red**: UPS error or AC power loss
-- **Blue**: WiFi connecting
-- **White**: NUT client activity
-- **Purple**: System error/reboot
+## 🤝 How to Contribute
 
-## 🏗️ **Architecture**
+- **Fork this project** and experiment with your own CyberPower UPS
+- **Submit pull requests** for bug fixes, improvements, or new features
+- **Open issues** for bugs, questions, or feature requests
+- **Help with CyberPower HID data mapping!**
+    - If you have access to documentation, reverse engineering skills, or other models, your help is especially welcome
+- **See something odd in the data?** Please share your findings!
 
-```
-┌─────────────────────────────────────┐
-│ 5. Home Assistant Integration       │
-├─────────────────────────────────────┤
-│ 4. NUT Server (TCP/3493)            │
-├─────────────────────────────────────┤
-│ 3. CyberPower HID Parser            │
-├─────────────────────────────────────┤
-│ 2. USB HID Communication            │
-├─────────────────────────────────────┤
-│ 1. WiFi Connection                  │
-└─────────────────────────────────────┘
-```
+---
 
-## 📋 **Requirements**
+## 🗂️ Branching Strategy
 
-### Hardware
-- ESP32-S3 development board with USB-OTG capability
-- USB OTG cable for UPS connection
-- CyberPower VP700ELCD or VP1000ELCD UPS
+- **master**: Always stable, last tested working code (currently VP1000 HID parser)
+- **feature/ups-data-parsing**: Stable HID parsing and queue improvements
+- **feature/nut-server-integration**: In development, NUT protocol and Home Assistant integration
+- **Other feature branches**: For experimental or future work
 
-### Software
-- ESP-IDF v5.1 or later
-- Home Assistant with NUT integration
+---
 
-## 🚀 **Development Status**
+## 🚧 Next Steps
 
-- [x] Repository setup and backup
-- [ ] WiFi connection layer (reliable)
-- [ ] USB HID reading layer (reliable)
-- [ ] CyberPower-specific parsing
-- [ ] NUT server implementation
-- [ ] Home Assistant integration
-- [ ] LED status system
-- [ ] Production optimization
+- **NUT server implementation** (feature/nut-server-integration branch)
+- **Home Assistant integration**
+- **Data accuracy improvements** (help wanted!)
+- **LED status system** (planned)
 
-## 📚 **Documentation References**
+---
+
+## 📚 Documentation References
 
 - [USB HID Power Devices Specification](https://www.usb.org/sites/default/files/pdcv10_0.pdf)
 - [CyberPower MIB Documentation](https://www.cyberpowersystems.com/products/software/mib-files/)
 - [NUT CyberPower Driver](https://github.com/networkupstools/nut/blob/master/drivers/cyberpower-mib.c)
 - [Original Project Documentation](https://github.com/ludoux/esp32-nut-server-usbhid)
 
-## 🙏 **Credits**
+---
+
+## 🙏 Credits
 
 **Original Author**: [ludoux](https://github.com/ludoux) - Created the base ESP32 USB-HID NUT server implementation
 
 **This Fork**: Specialized for CyberPower UPS integration with Home Assistant, featuring improved reliability, accuracy, and maintainability.
 
-## 📄 **License**
+---
+
+## 📄 License
 
 GPL-3.0 (inherited from original project)
 
