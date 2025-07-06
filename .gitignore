@@ -6,3 +6,5 @@ sdkconfig*
 debug.log
 managed_components/*
 dependencies.lock
+# WiFi credentials (never commit)
+main/wifi_secrets.h

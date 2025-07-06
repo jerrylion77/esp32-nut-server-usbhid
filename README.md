@@ -116,6 +116,18 @@ idf.py build flash monitor
 ### **2. Configure WiFi**
 The ESP32 will attempt to connect to WiFi. Monitor the output to see connection status.
 
+**WiFi Credentials:**
+1. Copy `main/wifi_secrets_example.h` to `main/wifi_secrets.h`:
+   ```bash
+   cp main/wifi_secrets_example.h main/wifi_secrets.h
+   ```
+2. Edit `main/wifi_secrets.h` and fill in your WiFi SSID and password:
+   ```c
+   #define WIFI_SSID      "YourNetwork"
+   #define WIFI_PASSWORD  "YourPassword"
+   ```
+3. **Do not commit this file to git!** It is already listed in `.gitignore` for your safety.
+
 ### **3. Home Assistant Integration**
 1. Add NUT integration in Home Assistant
 2. Configure with:

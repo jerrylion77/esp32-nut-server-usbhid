@@ -1185,8 +1185,9 @@ static void __attribute__((unused)) configure_led(void)
 }
 
 // WiFi Configuration - Layer 1: Reliable WiFi Connection
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#include "wifi_secrets.h" // <-- User must create this file with their WiFi credentials
+// #define WIFI_SSID "YOUR_WIFI_SSID"
+// #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 #define WIFI_MAXIMUM_RETRY 5
 #define WIFI_RECONNECT_DELAY_MS 5000
 
