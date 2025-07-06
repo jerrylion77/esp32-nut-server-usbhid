@@ -69,6 +69,17 @@ typedef struct {
     uint16_t actual_voltage;
     uint8_t audible_alarm_control;
     bool beep_enabled;
+    uint8_t system_status;
+    uint32_t extended_status;
+    uint8_t temperature;
+    uint32_t additional_sensor;
+    // Additional fields for complete parsing
+    uint8_t battery_byte2;      // 0x20 byte 2
+    uint8_t battery_byte3;      // 0x20 byte 3
+    uint8_t status_byte2;       // 0x21 byte 2
+    uint16_t output_voltage;    // 0x23 bytes 3-4
+    uint16_t temp_range1;       // 0x86 bytes 1-2
+    uint16_t temp_range2;       // 0x87 bytes 1-2
 } ups_data_t;
 
 // Predefined UPS model configurations

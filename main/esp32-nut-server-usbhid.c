@@ -44,8 +44,8 @@
 
 #include <inttypes.h>
 
-// Global variable to hold the latest UPS data for NUT reporting
-static ups_data_t latest_ups_data = {0};
+// Global variable to hold the latest UPS data for NUT reporting (unused in current implementation)
+// static ups_data_t latest_ups_data = {0};
 
 // CyberPower UPS vendor/product IDs
 #define CYBERPOWER_VENDOR_ID    0x0764
@@ -85,6 +85,9 @@ static void refresh_ups_status_from_hid(bool *beep);
 
 static led_strip_handle_t led_strip;
 
+// Logging control - set to 0 to disable verbose UPS parsing logs
+#define VERBOSE_UPS_LOGGING 1
+
 static const char *TAG = "ups";
 QueueHandle_t hid_host_event_queue;
 QueueHandle_t timer_queue;
@@ -96,16 +99,16 @@ bool user_shutdown = false;
 bool UPS_DEV_CONNECTED = false;
 hid_host_device_handle_t latest_hid_device_handle;
 
-// Store debug data for CyberPower UPS
-static uint8_t debug_report_data[16][MAX_REPORT_SIZE];
-static size_t debug_report_lengths[16];
-static bool debug_data_available = false;
+// Store debug data for CyberPower UPS (unused in current implementation)
+// static uint8_t debug_report_data[16][MAX_REPORT_SIZE];
+// static size_t debug_report_lengths[16];
+// static bool debug_data_available = false;
 
-// Store live HID data for UPS parsing
-static uint8_t live_hid_data[256][MAX_REPORT_SIZE];  // Support all possible report IDs (0x00-0xFF)
-static size_t live_hid_lengths[256];
-static bool live_data_available = false;
-static uint32_t last_live_data_time = 0;
+// Store live HID data for UPS parsing (unused in current implementation)
+// static uint8_t live_hid_data[256][MAX_REPORT_SIZE];  // Support all possible report IDs (0x00-0xFF)
+// static size_t live_hid_lengths[256];
+// static bool live_data_available = false;
+// static uint32_t last_live_data_time = 0;
 
 /**
  * @brief HID Host event
@@ -241,7 +244,7 @@ static void log_socket_error(const char *tag, const int sock, const int err, con
  *          -1 : Error occurred during socket read operation
  *          -2 : Socket is not connected, to distinguish between an actual socket error and active disconnection
  */
-static int try_receive(const char *tag, const int sock, char * data, size_t max_len)
+static int __attribute__((unused)) try_receive(const char *tag, const int sock, char * data, size_t max_len)
 {
     int len = recv(sock, data, max_len, 0);
     if (len < 0) {
@@ -301,592 +304,11 @@ static inline char* get_clients_address(struct sockaddr_storage *source_addr)
     return address_str;
 }
 
+// TCP Server Task - DISABLED
 static void __attribute__((unused)) tcp_server_task(void *pvParameters)
 {
-    static char rx_buffer[128];
-    static const char *TAG = "tcp-svr";
-    SemaphoreHandle_t *server_ready = pvParameters;
-    struct addrinfo hints = { .ai_socktype = SOCK_STREAM };
-    struct addrinfo *address_info;
-    int listen_sock = INVALID_SOCK;
-    const size_t max_socks = CONFIG_LWIP_MAX_SOCKETS - 1;
-    static int sock[CONFIG_LWIP_MAX_SOCKETS - 1];
-
-    // Prepare a list of file descriptors to hold client's sockets, mark all of them as invalid, i.e. available
-    for (int i=0; i<max_socks; ++i) {
-        sock[i] = INVALID_SOCK;
-    }
-
-    // Translating the hostname or a string representation of an IP to address_info
-    int res = getaddrinfo(CONFIG_EXAMPLE_TCP_SERVER_BIND_ADDRESS, CONFIG_EXAMPLE_TCP_SERVER_BIND_PORT, &hints, &address_info);
-    if (res != 0 || address_info == NULL) {
-        ESP_LOGE(TAG, "couldn't get hostname for `%s` "
-                      "getaddrinfo() returns %d, addrinfo=%p", CONFIG_EXAMPLE_TCP_SERVER_BIND_ADDRESS, res, address_info);
-        goto error;
-    }
-
-    // Creating a listener socket
-    listen_sock = socket(address_info->ai_family, address_info->ai_socktype, address_info->ai_protocol);
-
-    if (listen_sock < 0) {
-        log_socket_error(TAG, listen_sock, errno, "Unable to create socket");
-        goto error;
-    }
-    ESP_LOGI(TAG, "Listener socket created");
-
-    // Marking the socket as non-blocking
-    int flags = fcntl(listen_sock, F_GETFL);
-    if (fcntl(listen_sock, F_SETFL, flags | O_NONBLOCK) == -1) {
-        log_socket_error(TAG, listen_sock, errno, "Unable to set socket non blocking");
-        goto error;
-    }
-    //ESP_LOGI(TAG, "Socket marked as non blocking");
-
-    // Binding socket to the given address
-    int err = bind(listen_sock, address_info->ai_addr, address_info->ai_addrlen);
-    if (err != 0) {
-        log_socket_error(TAG, listen_sock, errno, "Socket unable to bind");
-        goto error;
-    }
-    ESP_LOGI(TAG, "Socket bound on %s:%s", CONFIG_EXAMPLE_TCP_SERVER_BIND_ADDRESS, CONFIG_EXAMPLE_TCP_SERVER_BIND_PORT);
-
-    // Set queue (backlog) of pending connections to one (can be more)
-    err = listen(listen_sock, 1);
-    if (err != 0) {
-        log_socket_error(TAG, listen_sock, errno, "Error occurred during listen");
-        goto error;
-    }
-    ESP_LOGI(TAG, "Socket listening");
-    xSemaphoreGive(*server_ready);
-
-    // Main loop for accepting new connections and serving all connected clients
-    while (1) {
-        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
-        socklen_t addr_len = sizeof(source_addr);
-
-        // Find a free socket
-        int new_sock_index = 0;
-        for (new_sock_index=0; new_sock_index<max_socks; ++new_sock_index) {
-            if (sock[new_sock_index] == INVALID_SOCK) {
-                break;
-            }
-        }
-
-        // We accept a new connection only if we have a free socket
-        if (new_sock_index < max_socks) {
-            // Try to accept a new connections
-            sock[new_sock_index] = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-
-            if (sock[new_sock_index] < 0) {
-                if (errno == EWOULDBLOCK) { // The listener socket did not accepts any connection
-                                            // continue to serve open connections and try to accept again upon the next iteration
-                    ESP_LOGV(TAG, "No pending connections...");
-                } else {
-                    log_socket_error(TAG, listen_sock, errno, "Error when accepting connection");
-                    goto error;
-                }
-            } else {
-                // We have a new client connected -> print it's address
-                ESP_LOGI(TAG, "[sock=%d]: Connection accepted from IP:%s", sock[new_sock_index], get_clients_address(&source_addr));
-
-                led_strip_set_pixel(led_strip, 0, 0x01, 0x01, 0x01);
-                /* Refresh the strip to send data */
-                led_strip_refresh(led_strip);
-
-                // ...and set the client's socket non-blocking
-                flags = fcntl(sock[new_sock_index], F_GETFL);
-                if (fcntl(sock[new_sock_index], F_SETFL, flags | O_NONBLOCK) == -1) {
-                    log_socket_error(TAG, sock[new_sock_index], errno, "Unable to set socket non blocking");
-                    goto error;
-                }
-                //ESP_LOGI(TAG, "[sock=%d]: Socket marked as non blocking", sock[new_sock_index]);
-            }
-        }
-
-        // We serve all the connected clients in this loop
-        for (int i=0; i<max_socks; ++i) {
-            if (sock[i] != INVALID_SOCK) {
-
-                // This is an open socket -> try to serve it
-                int len = try_receive(TAG, sock[i], rx_buffer, sizeof(rx_buffer));
-                if (len < 0) {
-                    // Error occurred within this client's socket -> close and mark invalid
-                    ESP_LOGI(TAG, "[sock=%d]: try_receive() returned %d -> closing the socket", sock[i], len);
-                    close(sock[i]);
-                    sock[i] = INVALID_SOCK;
-                } else if (len > 0) {
-                    ESP_LOGI(TAG, "[NUT] RX from HA: %.*s", len, rx_buffer);
-                    if (len > 1 && rx_buffer[len-1] == '\n')
-                    {
-                        ESP_LOGI(TAG, "[sock=%d]: Received %.*s", sock[i], len-1, rx_buffer);
-                    }
-                    else
-                    {
-                        ESP_LOGI(TAG, "[sock=%d]: Received %.*s", sock[i], len, rx_buffer);
-                    }
-                    
-                    // Debug: Print raw buffer contents with hex values
-                    ESP_LOGI(TAG, "[sock=%d]: Raw buffer (len=%d): [%s]", sock[i], len, rx_buffer);
-                    ESP_LOGI(TAG, "[sock=%d]: Hex dump:", sock[i]);
-                    for (int j = 0; j < len && j < 32; j++) {
-                        printf("%02x ", (unsigned char)rx_buffer[j]);
-                    }
-                    printf("\n");
-                    
-                    const char* rt = NULL;
-                    
-                    if (UPS_DEV_CONNECTED)
-                    {
-                        ESP_LOGI(TAG, "[sock=%d]: UPS connected, handling commands", sock[i]);
-                        if (str_startswith(rx_buffer, "USERNAME") || str_startswith(rx_buffer, "PASSWORD") || str_startswith(rx_buffer, "LOGIN"))
-                        {
-                            // Safety Attention: will not check whether the user & password is correct.
-                            // Make sure your LAN environment is safe.
-                            rt = "OK\n";
-                        }
-                        else if (str_startswith(rx_buffer, "LIST VAR"))
-                        {
-                            // Use latest UPS data for dynamic response
-                            static char response_buffer[2048];
-                            const char *alias = "VP700ELCD";
-                            
-                            // Get fresh UPS data before responding
-                            bool beep = false;
-                            refresh_ups_status_from_hid(&beep);
-                            
-                            // Build status string with proper NUT format
-                            char status_str[32] = "";
-                            if (latest_ups_data.ac_present) {
-                                strcpy(status_str, "OL");
-                                if (latest_ups_data.shutdown_imminent) {
-                                    strcat(status_str, " LB");
-                                }
-                                if (!latest_ups_data.good || latest_ups_data.internal_failure || latest_ups_data.need_replacement) {
-                                    strcat(status_str, " RB");
-                                }
-                                if (latest_ups_data.overload) {
-                                    strcat(status_str, " OVER");
-                                }
-                            } else {
-                                strcpy(status_str, "OB");
-                            }
-                            
-                            snprintf(response_buffer, sizeof(response_buffer),
-                                "BEGIN LIST VAR %s\n"
-                                "VAR %s ups.status \"%s\"\n"
-                                "VAR %s ups.load \"%d\"\n"
-                                "VAR %s ups.battery.charge \"%d\"\n"
-                                "VAR %s ups.battery.runtime \"%lu\"\n"
-                                "VAR %s ups.battery.voltage \"%.1f\"\n"
-                                "VAR %s ups.battery.type \"PbAc\"\n"
-                                "VAR %s ups.battery.charge.low \"20\"\n"
-                                "VAR %s ups.battery.charger.status \"%s\"\n"
-                                "VAR %s ups.input.voltage \"%.1f\"\n"
-                                "VAR %s ups.input.frequency \"60.0\"\n"
-                                "VAR %s ups.input.frequency.nominal \"60\"\n"
-                                "VAR %s ups.output.voltage \"%.1f\"\n"
-                                "VAR %s ups.output.frequency \"60.0\"\n"
-                                "VAR %s ups.output.frequency.nominal \"60\"\n"
-                                "VAR %s ups.power.nominal \"700\"\n"
-                                "VAR %s ups.mfr \"CyberPower\"\n"
-                                "VAR %s ups.model \"VP700ELCD\"\n"
-                                "VAR %s ups.serial \"Unknown\"\n"
-                                "VAR %s ups.firmware \"Unknown\"\n"
-                                "VAR %s ups.type \"offline / line interactive\"\n"
-                                "VAR %s ups.beeper.status \"%s\"\n"
-                                "VAR %s ups.delay.shutdown \"20\"\n"
-                                "VAR %s ups.delay.start \"30\"\n"
-                                "VAR %s ups.timer.shutdown \"0\"\n"
-                                "VAR %s ups.timer.start \"0\"\n"
-                                "VAR %s ups.battery.charge.low \"20\"\n"
-                                "VAR %s ups.battery.type \"PbAc\"\n"
-                                "VAR %s ups.input.frequency.nominal \"60\"\n"
-                                "VAR %s ups.output.frequency.nominal \"60\"\n"
-                                "VAR %s ups.power.nominal \"700\"\n"
-                                "VAR %s ups.mfr \"CyberPower\"\n"
-                                "VAR %s ups.model \"VP700ELCD\"\n"
-                                "VAR %s ups.serial \"Unknown\"\n"
-                                "VAR %s ups.firmware \"Unknown\"\n"
-                                "VAR %s ups.type \"offline / line interactive\"\n"
-                                "VAR %s ups.delay.shutdown \"20\"\n"
-                                "VAR %s ups.delay.start \"30\"\n"
-                                "END LIST VAR %s\n",
-                                alias, // BEGIN LIST VAR %s
-                                alias, // VAR %s ups.status
-                                status_str, // status string with proper NUT format
-                                alias, // VAR %s ups.load
-                                latest_ups_data.ups_load, // load int
-                                alias, // VAR %s ups.battery.charge
-                                latest_ups_data.battery_charge, // charge int
-                                alias, // VAR %s ups.battery.runtime
-                                (unsigned long)latest_ups_data.battery_runtime, // runtime ulong
-                                alias, // VAR %s ups.battery.voltage
-                                (float)latest_ups_data.actual_voltage / 10.0f, // voltage float
-                                alias, // VAR %s ups.battery.type
-                                alias, // VAR %s ups.battery.charge.low
-                                alias, // VAR %s ups.battery.charger.status
-                                latest_ups_data.charging ? "charging" : (latest_ups_data.discharging ? "discharging" : "floating"), // charger status string
-                                alias, // VAR %s ups.input.voltage
-                                (float)latest_ups_data.actual_voltage / 10.0f, // input voltage from live data
-                                alias, // VAR %s ups.input.frequency
-                                alias, // VAR %s ups.input.frequency.nominal
-                                alias, // VAR %s ups.output.voltage
-                                (float)latest_ups_data.actual_voltage / 10.0f, // output voltage from live data
-                                alias, // VAR %s ups.output.frequency
-                                alias, // VAR %s ups.output.frequency.nominal
-                                alias, // VAR %s ups.power.nominal
-                                alias, // VAR %s ups.mfr
-                                alias, // VAR %s ups.model
-                                alias, // VAR %s ups.serial
-                                alias, // VAR %s ups.firmware
-                                alias, // VAR %s ups.type
-                                alias, // VAR %s ups.beeper.status
-                                latest_ups_data.beep_enabled ? "enabled" : "disabled", // beeper status string
-                                alias, // VAR %s ups.delay.shutdown
-                                alias, // VAR %s ups.delay.start
-                                alias, // VAR %s ups.timer.shutdown
-                                alias, // VAR %s ups.timer.start
-                                alias, // VAR %s ups.battery.charge.low
-                                alias, // VAR %s ups.battery.type
-                                alias, // VAR %s ups.input.frequency.nominal
-                                alias, // VAR %s ups.output.frequency.nominal
-                                alias, // VAR %s ups.power.nominal
-                                alias, // VAR %s ups.mfr
-                                alias, // VAR %s ups.model
-                                alias, // VAR %s ups.serial
-                                alias, // VAR %s ups.firmware
-                                alias, // VAR %s ups.type
-                                alias, // VAR %s ups.delay.shutdown
-                                alias, // VAR %s ups.delay.start
-                                alias  // END LIST VAR %s
-                            );
-                            rt = response_buffer;
-                            ESP_LOGI(TAG, "[sock=%d]: Responding to LIST VAR with live values - Status: %s, Load: %d%%, Battery: %d%%, Runtime: %lu s", 
-                                   sock[i], status_str, latest_ups_data.ups_load, latest_ups_data.battery_charge, (unsigned long)latest_ups_data.battery_runtime);
-                        }
-                        else if (str_startswith(rx_buffer, "LIST UPS"))
-                        {
-                            // Strictly respond to LIST UPS
-                            rt = "BEGIN LIST UPS\nUPS VP700ELCD \"CyberPower VP700ELCD\"\nUPS cyberpower \"CyberPower VP700ELCD\"\nEND LIST UPS\n";
-                            ESP_LOGI(TAG, "[sock=%d]: Responding to LIST UPS: %s", sock[i], rt);
-                        }
-                        else if (str_startswith(rx_buffer, "LIST CMD"))
-                        {
-                            // Handle LIST CMD command - return empty list since we don't support commands
-                            rt = "BEGIN LIST CMD VP700ELCD\nEND LIST CMD VP700ELCD\n";
-                            ESP_LOGI(TAG, "[sock=%d]: Responding to LIST CMD VP700ELCD", sock[i]);
-                        }
-                        else if (str_startswith(rx_buffer, "LIST VAR "))
-                        {
-                            // Only respond to LIST VAR VP700ELCD
-                            char *alias_ptr = rx_buffer + strlen("LIST VAR ");
-                            // Remove trailing newline/whitespace
-                            char alias[32] = {0};
-                            int j = 0;
-                            while (*alias_ptr && *alias_ptr != '\r' && *alias_ptr != '\n' && j < 31) {
-                                alias[j++] = *alias_ptr++;
-                            }
-                            alias[j] = '\0';
-                            if (strcmp(alias, "VP700ELCD") == 0 || strcmp(alias, "cyberpower") == 0) {
-                                // Get fresh UPS data before responding
-                                bool beep = false;
-                                refresh_ups_status_from_hid(&beep);
-                                
-                                // Build status string with proper NUT format
-                                char status_str[32] = "";
-                                if (latest_ups_data.ac_present) {
-                                    strcpy(status_str, "OL");
-                                    if (latest_ups_data.shutdown_imminent) {
-                                        strcat(status_str, " LB");
-                                    }
-                                    if (!latest_ups_data.good || latest_ups_data.internal_failure || latest_ups_data.need_replacement) {
-                                        strcat(status_str, " RB");
-                                    }
-                                    if (latest_ups_data.overload) {
-                                        strcat(status_str, " OVER");
-                                    }
-                                } else {
-                                    strcpy(status_str, "OB");
-                                }
-                                
-                                // Use the requested alias in the response
-                                static char response_buffer[2048];
-                                snprintf(response_buffer, sizeof(response_buffer),
-                                    "BEGIN LIST VAR %s\n"
-                                    "VAR %s ups.status \"%s\"\n"
-                                    "VAR %s ups.load \"%d\"\n"
-                                    "VAR %s ups.battery.charge \"%d\"\n"
-                                    "VAR %s ups.battery.runtime \"%lu\"\n"
-                                    "VAR %s ups.battery.voltage \"%.1f\"\n"
-                                    "VAR %s ups.battery.type \"PbAc\"\n"
-                                    "VAR %s ups.battery.charge.low \"20\"\n"
-                                    "VAR %s ups.battery.charger.status \"%s\"\n"
-                                    "VAR %s ups.input.voltage \"%.1f\"\n"
-                                    "VAR %s ups.input.frequency \"60.0\"\n"
-                                    "VAR %s ups.input.frequency.nominal \"60\"\n"
-                                    "VAR %s ups.output.voltage \"%.1f\"\n"
-                                    "VAR %s ups.output.frequency \"60.0\"\n"
-                                    "VAR %s ups.output.frequency.nominal \"60\"\n"
-                                    "VAR %s ups.power.nominal \"700\"\n"
-                                    "VAR %s ups.mfr \"CyberPower\"\n"
-                                    "VAR %s ups.model \"VP700ELCD\"\n"
-                                    "VAR %s ups.serial \"Unknown\"\n"
-                                    "VAR %s ups.firmware \"Unknown\"\n"
-                                    "VAR %s ups.type \"offline / line interactive\"\n"
-                                    "VAR %s ups.beeper.status \"%s\"\n"
-                                    "VAR %s ups.delay.shutdown \"20\"\n"
-                                    "VAR %s ups.delay.start \"30\"\n"
-                                    "VAR %s ups.timer.shutdown \"0\"\n"
-                                    "VAR %s ups.timer.start \"0\"\n"
-                                    "END LIST VAR %s\n",
-                                    alias, // BEGIN LIST VAR %s
-                                    alias, // VAR %s ups.status
-                                    status_str, // status string with proper NUT format
-                                    alias, // VAR %s ups.load
-                                    latest_ups_data.ups_load, // load int
-                                    alias, // VAR %s ups.battery.charge
-                                    latest_ups_data.battery_charge, // charge int
-                                    alias, // VAR %s ups.battery.runtime
-                                    (unsigned long)latest_ups_data.battery_runtime, // runtime ulong
-                                    alias, // VAR %s ups.battery.voltage
-                                    (float)latest_ups_data.actual_voltage / 10.0f, // voltage float
-                                    alias, // VAR %s ups.battery.type
-                                    alias, // VAR %s ups.battery.charge.low
-                                    alias, // VAR %s ups.battery.charger.status
-                                    latest_ups_data.charging ? "charging" : (latest_ups_data.discharging ? "discharging" : "floating"), // charger status string
-                                    alias, // VAR %s ups.input.voltage
-                                    (float)latest_ups_data.actual_voltage / 10.0f, // input voltage from live data
-                                    alias, // VAR %s ups.input.frequency
-                                    alias, // VAR %s ups.input.frequency.nominal
-                                    alias, // VAR %s ups.output.voltage
-                                    (float)latest_ups_data.actual_voltage / 10.0f, // output voltage from live data
-                                    alias, // VAR %s ups.output.frequency
-                                    alias, // VAR %s ups.output.frequency.nominal
-                                    alias, // VAR %s ups.power.nominal
-                                    alias, // VAR %s ups.mfr
-                                    alias, // VAR %s ups.model
-                                    alias, // VAR %s ups.serial
-                                    alias, // VAR %s ups.firmware
-                                    alias, // VAR %s ups.type
-                                    alias, // VAR %s ups.beeper.status
-                                    latest_ups_data.beep_enabled ? "enabled" : "disabled", // beeper status string
-                                    alias, // VAR %s ups.delay.shutdown
-                                    alias, // VAR %s ups.delay.start
-                                    alias, // VAR %s ups.timer.shutdown
-                                    alias, // VAR %s ups.timer.start
-                                    alias  // END LIST VAR %s
-                                );
-                                rt = response_buffer;
-                                ESP_LOGI(TAG, "[sock=%d]: Responding to LIST VAR %s with live values - Status: %s, Load: %d%%, Battery: %d%%, Runtime: %lu s", 
-                                       sock[i], alias, status_str, latest_ups_data.ups_load, latest_ups_data.battery_charge, (unsigned long)latest_ups_data.battery_runtime);
-                            } else {
-                                rt = "ERR UNKNOWN UPS\n";
-                                ESP_LOGI(TAG, "[sock=%d]: Responding to LIST VAR for unknown alias: %s", sock[i], alias);
-                            }
-                        }
-                        else if (str_startswith(rx_buffer, "GET VAR VP700ELCD "))
-                        {
-                            // Get fresh UPS data before responding
-                            bool beep = false;
-                            refresh_ups_status_from_hid(&beep);
-                            
-                            // Build status string with proper NUT format
-                            char status_str[32] = "";
-                            if (latest_ups_data.ac_present) {
-                                strcpy(status_str, "OL");
-                                if (latest_ups_data.shutdown_imminent) {
-                                    strcat(status_str, " LB");
-                                }
-                                if (!latest_ups_data.good || latest_ups_data.internal_failure || latest_ups_data.need_replacement) {
-                                    strcat(status_str, " RB");
-                                }
-                                if (latest_ups_data.overload) {
-                                    strcat(status_str, " OVER");
-                                }
-                            } else {
-                                strcpy(status_str, "OB");
-                            }
-                            
-                            // Handle GET VAR for specific variables
-                            if (strstr(rx_buffer, "ups.status") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.status \"%s\"\n", status_str);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.load") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.load \"%d\"\n", latest_ups_data.ups_load);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.battery.charge") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.battery.charge \"%d\"\n", latest_ups_data.battery_charge);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.battery.runtime") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.battery.runtime \"%lu\"\n", (unsigned long)latest_ups_data.battery_runtime);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.battery.charger.status") != NULL) {
-                                static char response_buffer[128];
-                                const char *charger_status = latest_ups_data.charging ? "charging" : (latest_ups_data.discharging ? "discharging" : "floating");
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.battery.charger.status \"%s\"\n", charger_status);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.battery.voltage") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.battery.voltage \"%.1f\"\n", (float)latest_ups_data.actual_voltage / 10.0f);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.input.voltage") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.input.voltage \"%.1f\"\n", (float)latest_ups_data.actual_voltage / 10.0f);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.output.voltage") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.output.voltage \"%.1f\"\n", (float)latest_ups_data.actual_voltage / 10.0f);
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.input.frequency") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.input.frequency \"60.0\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.output.frequency") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.output.frequency \"60.0\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.power.nominal") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.power.nominal \"700\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.mfr") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.mfr \"CyberPower\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.model") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.model \"VP700ELCD\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.beeper.status") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.beeper.status \"%s\"\n", latest_ups_data.beep_enabled ? "enabled" : "disabled");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.battery.charge.low") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.battery.charge.low \"20\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.battery.type") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.battery.type \"PbAc\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.input.frequency.nominal") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.input.frequency.nominal \"60\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.output.frequency.nominal") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.output.frequency.nominal \"60\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.delay.shutdown") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.delay.shutdown \"20\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.delay.start") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.delay.start \"30\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.timer.shutdown") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.timer.shutdown \"0\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.timer.start") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.timer.start \"0\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.serial") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.serial \"Unknown\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.firmware") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.firmware \"Unknown\"\n");
-                                rt = response_buffer;
-                            } else if (strstr(rx_buffer, "ups.type") != NULL) {
-                                static char response_buffer[128];
-                                snprintf(response_buffer, sizeof(response_buffer), "VAR VP700ELCD ups.type \"offline / line interactive\"\n");
-                                rt = response_buffer;
-                            } else {
-                                rt = "ERR UNKNOWN VARIABLE\n";
-                            }
-                            ESP_LOGI(TAG, "[sock=%d]: Responding to GET VAR with live value", sock[i]);
-                        }
-                        else if (str_startswith(rx_buffer, "LOGOUT"))
-                        {
-                            char *bye_text = "OK Goodbye\n";
-                            rt = bye_text;
-                        }
-                        else {
-                            rt = "ERR UNKNOWN COMMAND\n";
-                        }
-                    }
-                    else
-                    {
-                        ESP_LOGI(TAG, "[sock=%d]: No UPS connected, handling basic NUT commands", sock[i]);
-                        // UPS not connected, only handle authentication commands
-                        if (str_startswith(rx_buffer, "USERNAME") || str_startswith(rx_buffer, "PASSWORD") || str_startswith(rx_buffer, "LOGIN"))
-                        {
-                            rt = "OK\n";
-                        }
-                        else if (strncasecmp(rx_buffer, "LIST UPS", 8) == 0) {
-                            // Return empty list when no UPS is connected
-                            rt = "BEGIN LIST UPS\nEND LIST UPS\n";
-                            ESP_LOGI(TAG, "[sock=%d]: No UPS connected, returning empty LIST UPS", sock[i]);
-                        }
-                        else if (str_startswith(rx_buffer, "LIST CMD"))
-                        {
-                            // Return empty list when no UPS is connected
-                            rt = "BEGIN LIST CMD\nEND LIST CMD\n";
-                            ESP_LOGI(TAG, "[sock=%d]: No UPS connected, returning empty LIST CMD", sock[i]);
-                        }
-                        else if (str_startswith(rx_buffer, "LIST VAR"))
-                        {
-                            // Return empty list when no UPS is connected
-                            rt = "BEGIN LIST VAR\nEND LIST VAR\n";
-                            ESP_LOGI(TAG, "[sock=%d]: No UPS connected, returning empty LIST VAR", sock[i]);
-                        }
-                        else {
-                            rt = "ERR UNKNOWN COMMAND\n";
-                        }
-                    }
-
-                    if (rt != NULL)
-                    {
-                        int sent = send(sock[i], rt, strlen(rt), 0);
-                        ESP_LOGI(TAG, "[sock=%d]: Sent response (%d bytes): %s", sock[i], sent, rt);
-                        if (sent < 0)
-                        {
-                            ESP_LOGE(TAG, "[sock=%d]: Failed to send response: %s", sock[i], strerror(errno));
-                        // Error occurred on write to this socket -> close it and mark invalid
-                            ESP_LOGI(TAG, "[sock=%d]: socket_send() returned %d -> closing the socket", sock[i], sent);
-                        close(sock[i]);
-                        sock[i] = INVALID_SOCK;
-                        }
-                    }
-                }
-
-            } // one client's socket
-        } // for all sockets
-
-        // Yield to other tasks
-        vTaskDelay(pdMS_TO_TICKS(YIELD_TO_ALL_MS));
-    }
-
-error:
-    if (listen_sock != INVALID_SOCK) {
-        close(listen_sock);
-    }
-
-    for (int i=0; i<max_socks; ++i) {
-        if (sock[i] != INVALID_SOCK) {
-            close(sock[i]);
-        }
-    }
-
-    free(address_info);
+    // DISABLED - depends on stored data
+    ESP_LOGI(TAG, "TCP server task disabled - no data storage in current implementation");
     vTaskDelete(NULL);
 }
 
@@ -930,33 +352,155 @@ error:
  * @param[in] data    Pointer to input report data buffer
  * @param[in] length  Length of input report data buffer
  */
+// Global variable to store current UPS data
+// static ups_data_t current_ups_data = {0};  // Unused in current implementation
+
 static void hid_host_generic_report_callback(const uint8_t *const data, const int length)
 {
-    ESP_LOGI(TAG, "=== HID REPORT RECEIVED ===");
-    ESP_LOGI(TAG, "Length: %d bytes", length);
+    if (length < 1) {
+        ESP_LOGW(TAG, "Received empty HID report");
+        return;
+    }
+    
+    uint8_t report_id = data[0];
+    
+#if VERBOSE_UPS_LOGGING
+    ESP_LOGI(TAG, "=== PARSING REPORT 0x%02X (Length: %d) ===", report_id, length);
+    
+    // Display raw data first
     ESP_LOGI(TAG, "Raw data:");
-    
-    // Display raw bytes
-    for (int i = 0; i < length && i < 32; i++) {  // Limit to 32 bytes for readability
+    for (int i = 0; i < length && i < 16; i++) {
         printf("%02X ", data[i]);
-        if ((i + 1) % 8 == 0) printf("\n");
     }
-    if (length > 32) {
-        printf("... (truncated, total %d bytes)\n", length);
-    } else {
-        printf("\n");
+    if (length > 16) printf("...");
+    printf("\n");
+#endif
+    
+    // Parse ALL reports with smart length handling
+    switch (report_id) {
+        case 0x20:  // Battery and Load Status
+            ESP_LOGI(TAG, "Report 0x20 - Battery/Status Data:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Battery Level: %d%%", data[1]);
+            }
+            if (length >= 3) {
+                ESP_LOGI(TAG, "  Battery Byte2: %d", data[2]);
+            }
+            if (length >= 4) {
+                ESP_LOGI(TAG, "  Battery Byte3: %d", data[3]);
+            }
+            break;
+            
+        case 0x21:  // Status Flags
+            ESP_LOGI(TAG, "Report 0x21 - Status Flags:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Status: %d", data[1]);
+            }
+            if (length >= 3) {
+                ESP_LOGI(TAG, "  Status Byte2: %d", data[2]);
+            }
+            break;
+            
+        case 0x22:  // Runtime
+            ESP_LOGI(TAG, "Report 0x22 - Runtime Data:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Runtime: %d minutes", data[1]);
+            }
+            break;
+            
+        case 0x23:  // Voltage Data
+            ESP_LOGI(TAG, "Report 0x23 - Voltage Data:");
+            if (length >= 3) {
+                uint16_t voltage1 = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Input Voltage: %d V", voltage1);
+            }
+            if (length >= 5) {
+                uint16_t voltage2 = (data[4] << 8) | data[3];
+                ESP_LOGI(TAG, "  Output Voltage: %d V", voltage2);
+            }
+            break;
+            
+        case 0x25:  // Load Percentage
+            ESP_LOGI(TAG, "Report 0x25 - Load Data:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Load: %d%%", data[1]);
+            }
+            break;
+            
+        case 0x28:  // Alarm Control
+            ESP_LOGI(TAG, "Report 0x28 - Alarm Control:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Alarm Control: %d", data[1]);
+            }
+            break;
+            
+        case 0x29:  // Beep Control
+            ESP_LOGI(TAG, "Report 0x29 - Beep Control:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Beep Control: %d", data[1]);
+            }
+            break;
+            
+        case 0x80:  // System Status
+            ESP_LOGI(TAG, "Report 0x80 - System Status:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  System Status: %d", data[1]);
+            }
+            break;
+            
+        case 0x82:  // Extended Status
+            ESP_LOGI(TAG, "Report 0x82 - Extended Status:");
+            if (length >= 3) {
+                uint16_t ext_status = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Extended Status: %d", ext_status);
+            }
+            break;
+            
+        case 0x85:  // Temperature/Sensor
+            ESP_LOGI(TAG, "Report 0x85 - Temperature/Sensor:");
+            if (length >= 2) {
+                ESP_LOGI(TAG, "  Temperature: %d", data[1]);
+            }
+            break;
+            
+        case 0x86:  // Temperature Range 1
+            ESP_LOGI(TAG, "Report 0x86 - Temperature Range 1:");
+            if (length >= 3) {
+                uint16_t temp_range = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Temp Range 1: %d", temp_range);
+            }
+            break;
+            
+        case 0x87:  // Temperature Range 2
+            ESP_LOGI(TAG, "Report 0x87 - Temperature Range 2:");
+            if (length >= 3) {
+                uint16_t temp_range = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Temp Range 2: %d", temp_range);
+            }
+            break;
+            
+        case 0x88:  // Additional Sensor
+            ESP_LOGI(TAG, "Report 0x88 - Additional Sensor:");
+            if (length >= 3) {
+                uint16_t sensor_value = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Additional Sensor: %d", sensor_value);
+            }
+            break;
+            
+        default:
+            ESP_LOGI(TAG, "Report 0x%02X - UNKNOWN REPORT TYPE", report_id);
+            ESP_LOGI(TAG, "  Raw data:");
+            for (int i = 0; i < length && i < 16; i++) {
+                printf("%02X ", data[i]);
+            }
+            if (length > 16) printf("...");
+            printf("\n");
+            break;
     }
     
-    // Show first few bytes as decimal too
-    if (length > 0) {
-        ESP_LOGI(TAG, "First 8 bytes as decimal:");
-        for (int i = 0; i < length && i < 8; i++) {
-            printf("%3d ", data[i]);
-        }
-        printf("\n");
-    }
-    
+#if VERBOSE_UPS_LOGGING
     ESP_LOGI(TAG, "=============================");
+#endif
 }
 
 /**
@@ -995,6 +539,10 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
                 latest_hid_device_handle = hid_device_handle;
                 UPS_DEV_CONNECTED = true;
                 ESP_LOGI(TAG, "UPS data detected, sending to parsing logic");
+                
+                ESP_LOGI(TAG, "=== UPS PARSING INITIALIZED ===");
+                ESP_LOGI(TAG, "Ready to parse HID reports and extract UPS values");
+                ESP_LOGI(TAG, "================================");
             }
         }
 
@@ -1153,71 +701,13 @@ void set_beep(bool enabled)
     }
 }
 
-void refresh_ups_status_from_hid(bool *beep)
+void __attribute__((unused)) refresh_ups_status_from_hid(bool *beep)
 {
-    /**
-     * Generic UPS status parsing that supports multiple UPS models
-     * 
-     * This function now uses the generic parsing approach instead of hardcoded
-     * SANTAK TG-BOX 850 specific protocol.
-     * 
-     */
-    ups_data_t data;
-    esp_err_t ret = parse_ups_data_generic(latest_hid_device_handle, &data);
-    
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to parse UPS data");
-        
-        return;
+    // DISABLED - depends on stored data
+    ESP_LOGI(TAG, "refresh_ups_status_from_hid disabled - no data storage in current implementation");
+    if (beep) {
+        *beep = false;
     }
-    
-    bool all_good_flag = data.good && !data.internal_failure && !data.need_replacement;
-
-    char alert_text[32] = "";
-    if (!all_good_flag)
-    {
-        strcat(alert_text, "[Suboptimal] ");
-    }
-    if (data.overload)
-    {
-        strcat(alert_text, "[Overload] ");
-    }
-    if (data.shutdown_imminent)
-    {
-        strcat(alert_text, "[Shutdown Imminent] ");
-    }
-
-    // Data is already parsed in the generic function above
-    *beep = data.beep_enabled;
-
-    // Update JSON with parsed data using generic function
-    update_json_with_ups_data(&data);
-
-    ESP_LOGI(TAG, "%sExternal Power: %s, Charging: %s, Discharging: %s, Buzzer: %s, Battery: %d%%, Load: %d%%, Remaining Runtime: %lu s(%.2f min)",
-        alert_text,
-        data.ac_present ? "ON" : "OFF",
-        data.charging ? "Y" : "N",
-        data.discharging ? "Y" : "N",
-        data.beep_enabled ? "ON" : "OFF",
-        data.battery_charge,
-        data.ups_load,
-        (unsigned long)data.battery_runtime,
-        1.0 * data.battery_runtime / 60);
-    
-    if (all_good_flag && data.ac_present)
-    {
-        led_strip_set_pixel(led_strip, 0, 0, 0x03, 0);
-        /* Refresh the strip to send data */
-        led_strip_refresh(led_strip);
-    }
-    else
-    {
-        led_strip_set_pixel(led_strip, 0, 0x10, 0, 0);
-        /* Refresh the strip to send data */
-        led_strip_refresh(led_strip);
-    }
-    
-    latest_ups_data = data;
 }
 
 /// @brief to recheck ups status and refresh json object. 
@@ -1259,7 +749,7 @@ void hid_host_task(void *pvParameters)
 {
     hid_host_event_queue_t evt_queue;
     // Create queue
-    hid_host_event_queue = xQueueCreate(10, sizeof(hid_host_event_queue_t));
+    hid_host_event_queue = xQueueCreate(20, sizeof(hid_host_event_queue_t));
 
     // Wait queue
     while (!user_shutdown)
@@ -1610,7 +1100,7 @@ static esp_err_t __attribute__((unused)) init_generic_ups_models(void)
 //     // ... function body removed ...
 // }
 
-static uint8_t extract_field_value(const uint8_t *data, const hid_report_mapping_t *mapping)
+static uint8_t __attribute__((unused)) extract_field_value(const uint8_t *data, const hid_report_mapping_t *mapping)
 {
     if (mapping->data_offset + mapping->data_size > MAX_REPORT_SIZE) {
         return 0;
@@ -1623,7 +1113,7 @@ static uint8_t extract_field_value(const uint8_t *data, const hid_report_mapping
     return value;
 }
 
-static uint32_t extract_multi_byte_value(const uint8_t *data, const hid_report_mapping_t *mapping)
+static uint32_t __attribute__((unused)) extract_multi_byte_value(const uint8_t *data, const hid_report_mapping_t *mapping)
 {
     if (mapping->data_offset + mapping->data_size > MAX_REPORT_SIZE) {
         return 0;
@@ -1636,117 +1126,11 @@ static uint32_t extract_multi_byte_value(const uint8_t *data, const hid_report_m
     return value;
 }
 
-static esp_err_t parse_ups_data_generic(hid_host_device_handle_t device_handle, ups_data_t *data)
+static esp_err_t __attribute__((unused)) parse_ups_data_generic(hid_host_device_handle_t device_handle, ups_data_t *data)
 {
-    if (!model_detected || detected_model_index >= MAX_UPS_MODELS) {
-        ESP_LOGE(TAG, "No UPS model detected");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    ups_model_config_t *model = &ups_models[detected_model_index];
-    uint8_t recv[MAX_REPORT_SIZE];
-    size_t len;
-    
-    memset(data, 0, sizeof(ups_data_t));
-    
-    ESP_LOGI(TAG, "[PARSER] Model: %s, Mapping count: %d", model->model_name, model->mapping_count);
-    
-    // Check if we have recent live data (within last 5 seconds)
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    bool use_live_data = live_data_available && (current_time - last_live_data_time) < 5000;
-    
-    if (use_live_data) {
-        ESP_LOGI(TAG, "[PARSER] Using live HID data (age: %lu ms)", current_time - last_live_data_time);
-    } else {
-        ESP_LOGW(TAG, "[PARSER] No recent live data, using stored data");
-    }
-    
-    // Parse each field using the model's mappings
-    for (int i = 0; i < model->mapping_count; i++) {
-        hid_report_mapping_t *mapping = &model->mappings[i];
-        
-        ESP_LOGI(TAG, "[PARSER] ReportID: 0x%02X, FieldType: %d, Offset: %d, Size: %d", 
-                 mapping->report_id, mapping->field_type, mapping->data_offset, mapping->data_size);
-        
-        // Try to use live data first
-        if (use_live_data && live_hid_lengths[mapping->report_id] > 0) {
-            len = live_hid_lengths[mapping->report_id];
-            memcpy(recv, live_hid_data[mapping->report_id], len);
-            ESP_LOGI(TAG, "[PARSER] Using live data for report 0x%02X", mapping->report_id);
-        } else {
-            // Fallback to stored debug data
-            if (debug_data_available && mapping->report_id < 16 && debug_report_lengths[mapping->report_id] > 0) {
-                len = debug_report_lengths[mapping->report_id];
-                memcpy(recv, debug_report_data[mapping->report_id], len);
-                ESP_LOGI(TAG, "[PARSER] Using stored debug data for report 0x%02X", mapping->report_id);
-            } else {
-                ESP_LOGW(TAG, "[PARSER] No data available for report 0x%02X, skipping", mapping->report_id);
-                continue;
-            }
-        }
-        
-        // Parse the field based on its type
-        switch (mapping->field_type) {
-            case 0: // Status
-                {
-                    uint8_t status = extract_field_value(recv, mapping);
-                    ESP_LOGI(TAG, "[PARSER] Status byte: 0x%02X", status);
-                    data->ac_present = (status & UPS_STATUS_AC_PRESENT) != 0;
-                    data->charging = (status & UPS_STATUS_CHARGING) != 0;
-                    data->discharging = (status & UPS_STATUS_DISCHARGING) != 0;
-                    data->good = (status & UPS_STATUS_GOOD) != 0;
-                    data->internal_failure = (status & UPS_STATUS_INTERNAL_FAILURE) != 0;
-                    data->need_replacement = (status & UPS_STATUS_NEED_REPLACEMENT) != 0;
-                    data->overload = (status & UPS_STATUS_OVERLOAD) != 0;
-                    data->shutdown_imminent = (status & UPS_STATUS_SHUTDOWN_IMMINENT) != 0;
-                }
-                break;
-            case 1: // Battery charge
-                {
-                    uint8_t raw_battery = extract_field_value(recv, mapping);
-                    ESP_LOGI(TAG, "[PARSER] Raw battery: %d, Scaled: %d", raw_battery, (uint8_t)(raw_battery * model->battery_scale_factor));
-                    data->battery_charge = (uint8_t)(raw_battery * model->battery_scale_factor);
-                    if (data->battery_charge > 100) {
-                        data->battery_charge = 100;
-                    }
-                }
-                break;
-            case 2: // Runtime
-                {
-                    uint32_t raw_runtime = extract_multi_byte_value(recv, mapping);
-                    ESP_LOGI(TAG, "[PARSER] Raw runtime: %lu, Scaled: %lu", (unsigned long)raw_runtime, (unsigned long)(raw_runtime * model->runtime_scale_factor));
-                    data->battery_runtime = (uint32_t)(raw_runtime * model->runtime_scale_factor);
-                }
-                break;
-            case 3: // Load
-                {
-                    uint8_t raw_load = extract_field_value(recv, mapping);
-                    ESP_LOGI(TAG, "[PARSER] Raw load: %d, Scaled: %d", raw_load, (uint8_t)(raw_load * model->load_scale_factor));
-                    data->ups_load = (uint8_t)(raw_load * model->load_scale_factor);
-                    if (data->ups_load > 100) {
-                        data->ups_load = 100;
-                    }
-                }
-                break;
-            case 4: // Voltage
-                {
-                    uint32_t voltage = extract_multi_byte_value(recv, mapping);
-                    ESP_LOGI(TAG, "[PARSER] Voltage: %lu", (unsigned long)voltage);
-                    data->actual_voltage = voltage;  // 232V is correct for Australia
-                }
-                break;
-            case 5: // Alarm control
-                {
-                    uint8_t alarm = extract_field_value(recv, mapping);
-                    ESP_LOGI(TAG, "[PARSER] Alarm control: %d", alarm);
-                    data->audible_alarm_control = alarm;
-                    data->beep_enabled = (alarm == model->beep_enable_value);
-                }
-                break;
-        }
-    }
-    
-    return ESP_OK;
+    // DISABLED - depends on stored data
+    ESP_LOGI(TAG, "parse_ups_data_generic disabled - no data storage in current implementation");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t set_beep_generic(hid_host_device_handle_t device_handle, bool enabled)
@@ -1763,119 +1147,18 @@ static esp_err_t set_beep_generic(hid_host_device_handle_t device_handle, bool e
     return hid_class_request_set_report(device_handle, 0x03, model->beep_report_id, send, len);
 }
 
-static void update_json_with_ups_data(const ups_data_t *data)
+static void __attribute__((unused)) update_json_with_ups_data(const ups_data_t *data)
 {
-    ESP_LOGI(TAG, "[JSON] Updating NUT JSON: status=%s, battery_charge=%d, runtime=%lu, load=%d, voltage=%d, beep=%s", 
-        data->ac_present ? "OL" : "OB", data->battery_charge, (unsigned long)data->battery_runtime, data->ups_load, data->actual_voltage, data->beep_enabled ? "enabled" : "disabled");
-    char setted_text[32];
-    
-    // Update UPS status
-    if (data->ac_present) {
-        strcpy(setted_text, "OL");
-    } else {
-        strcpy(setted_text, "OB");
-    }
-    if (data->shutdown_imminent) {
-        strcat(setted_text, " LB");
-    }
-    if (!data->good || data->internal_failure || data->need_replacement) {
-        strcat(setted_text, " RB");
-    }
-    if (data->overload) {
-        strcat(setted_text, " OVER");
-    }
-    
-    cJSON *got_item = cJSON_GetObjectItemCaseSensitive(json_object, "ups");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "status");
-    cJSON_SetValuestring(got_item, setted_text);
-    
-    // Update battery charge
-    itoa(data->battery_charge, setted_text, 10);
-    got_item = cJSON_GetObjectItemCaseSensitive(json_object, "battery");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "charge");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "_root");
-    cJSON_SetValuestring(got_item, setted_text);
-    
-    // Update charger status
-    strcpy(setted_text, "");
-    if (data->charging) {
-        strcpy(setted_text, "charging");
-    } else if (data->discharging) {
-        strcpy(setted_text, "discharging");
-    }
-    got_item = cJSON_GetObjectItemCaseSensitive(json_object, "battery");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "charger");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "status");
-    cJSON_SetValuestring(got_item, setted_text);
-    
-    // Update runtime
-    itoa(data->battery_runtime, setted_text, 10);
-    got_item = cJSON_GetObjectItemCaseSensitive(json_object, "battery");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "runtime");
-    cJSON_SetValuestring(got_item, setted_text);
-    
-    // Update load
-    itoa(data->ups_load, setted_text, 10);
-    got_item = cJSON_GetObjectItemCaseSensitive(json_object, "ups");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "load");
-    cJSON_SetValuestring(got_item, setted_text);
-    
-    // Update voltage
-    itoa(data->actual_voltage, setted_text, 10);
-    got_item = cJSON_GetObjectItemCaseSensitive(json_object, "output");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "voltage");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "_root");
-    cJSON_SetValuestring(got_item, setted_text);
-    
-    // Update beeper status
-    strcpy(setted_text, data->beep_enabled ? "enabled" : "disabled");
-    got_item = cJSON_GetObjectItemCaseSensitive(json_object, "ups");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "beeper");
-    got_item = cJSON_GetObjectItemCaseSensitive(got_item, "status");
-    cJSON_SetValuestring(got_item, setted_text);
+    // DISABLED - depends on stored data
+    ESP_LOGI(TAG, "update_json_with_ups_data disabled - no data storage in current implementation");
 }
 
 
 
-static void __attribute__((unused)) debug_unknown_ups_model(hid_host_device_handle_t device_handle)
+static void __attribute__((unused)) debug_unknown_ups_model(hid_host_device_handle_t device_handle)  // DISABLED - depends on stored data
 {
-    ESP_LOGI(TAG, "=== DEBUG: Unknown UPS Model Detection ===");
-    
-    // Clear previous debug data
-    memset(debug_report_data, 0, sizeof(debug_report_data));
-    memset(debug_report_lengths, 0, sizeof(debug_report_lengths));
-    debug_data_available = false;
-    
-    // Try common report IDs to see what data is available
-    uint8_t report_ids[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
-    uint8_t recv[MAX_REPORT_SIZE];
-    size_t len;
-    
-    for (int i = 0; i < sizeof(report_ids); i++) {
-        len = MAX_REPORT_SIZE;
-        memset(recv, 0xFF, len);
-        
-        esp_err_t ret = hid_class_request_get_report(device_handle, 0x03, report_ids[i], recv, &len);
-        if (ret == ESP_OK && len > 0) {
-            ESP_LOGI(TAG, "Report 0x%02X (%d bytes):", report_ids[i], len);
-            for (int j = 0; j < len && j < 16; j++) {
-                printf("%02X ", recv[j]);
-            }
-            printf("\n");
-            
-            // Store the data for later use
-            if (len <= MAX_REPORT_SIZE) {
-                memcpy(debug_report_data[report_ids[i]], recv, len);
-                debug_report_lengths[report_ids[i]] = len;
-                debug_data_available = true;
-            }
-        } else if (ret != ESP_OK) {
-            // Log the error but don't crash
-            ESP_LOGW(TAG, "Failed to get report 0x%02X: %s", report_ids[i], esp_err_to_name(ret));
-        }
-    }
-    
-    ESP_LOGI(TAG, "=== End Debug ===");
+    // DISABLED - depends on stored data
+    ESP_LOGI(TAG, "debug_unknown_ups_model disabled - no data storage in current implementation");
 }
 
 
