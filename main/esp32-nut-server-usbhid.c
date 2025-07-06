@@ -44,6 +44,82 @@
 
 #include <inttypes.h>
 
+// === UPS Data Storage and State Management ===
+#include <stdbool.h>
+#include <stdint.h>
+
+#define UPS_DATA_FRESHNESS_TIMEOUT_MS 10000  // 10 seconds for data freshness
+
+// UPS state enum
+typedef enum {
+    UPS_DISCONNECTED = 0,
+    UPS_CONNECTED_WAITING_DATA,
+    UPS_CONNECTED_ACTIVE,
+    UPS_CONNECTED_STALE
+} ups_connection_state_t;
+
+// UPS data storage struct (17 fields)
+typedef struct {
+    int battery_level;
+    int battery_byte2;
+    int battery_byte3;
+    int status;
+    int status_byte2;
+    int runtime;
+    int input_voltage;
+    int output_voltage;
+    int load;
+    int alarm_control;
+    int beep_control;
+    int system_status;
+    int extended_status;
+    int temperature;
+    int temp_range1;
+    int temp_range2;
+    int additional_sensor;
+} ups_data_store_t;
+
+// Global UPS state
+static ups_connection_state_t ups_state = UPS_DISCONNECTED;
+static ups_data_store_t ups_data = {0};
+static uint32_t ups_last_data_time = 0;  // ms since boot
+static bool ups_available = false;
+
+// Background timer task for UPS data freshness checking
+static void ups_freshness_timer_task(void *pvParameters)
+{
+    const char *TAG = "ups-timer";
+    ESP_LOGI(TAG, "UPS freshness timer task started");
+    
+    while (1) {
+        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        uint32_t time_since_last_data = current_time - ups_last_data_time;
+        
+        // Check if UPS data is stale (no data for more than 10 seconds)
+        if (ups_state == UPS_CONNECTED_ACTIVE && time_since_last_data > UPS_DATA_FRESHNESS_TIMEOUT_MS) {
+            ups_state = UPS_CONNECTED_STALE;
+            ups_available = false;
+            ESP_LOGW(TAG, "UPS state: ACTIVE -> STALE (no data for %lu ms)", time_since_last_data);
+        }
+        
+        // Log current state every 30 seconds for debugging
+        static uint32_t last_log_time = 0;
+        if (current_time - last_log_time > 30000) {  // 30 seconds
+            if (ups_state == UPS_DISCONNECTED) {
+                ESP_LOGI(TAG, "UPS Timer Check - State: %d, Available: %s, UPS Disconnected", 
+                         ups_state, ups_available ? "YES" : "NO");
+            } else {
+                ESP_LOGI(TAG, "UPS Timer Check - State: %d, Available: %s, Last Data: %lu ms ago", 
+                         ups_state, ups_available ? "YES" : "NO", time_since_last_data);
+            }
+            last_log_time = current_time;
+        }
+        
+        // Check every 2 seconds
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
 // Global variable to hold the latest UPS data for NUT reporting (unused in current implementation)
 // static ups_data_t latest_ups_data = {0};
 
@@ -304,11 +380,116 @@ static inline char* get_clients_address(struct sockaddr_storage *source_addr)
     return address_str;
 }
 
-// TCP Server Task - DISABLED
-static void __attribute__((unused)) tcp_server_task(void *pvParameters)
+// TCP Server Task
+void tcp_server_task(void *pvParameters)
 {
-    // DISABLED - depends on stored data
-    ESP_LOGI(TAG, "TCP server task disabled - no data storage in current implementation");
+    static char rx_buffer[128];
+    static const char *TAG = "tcp-svr";
+    struct addrinfo hints = { .ai_socktype = SOCK_STREAM };
+    struct addrinfo *address_info;
+    int listen_sock = INVALID_SOCK;
+    const size_t max_socks = 4; // Allow up to 4 clients
+    static int sock[4];
+
+    for (int i = 0; i < max_socks; ++i) {
+        sock[i] = INVALID_SOCK;
+    }
+
+    int res = getaddrinfo("0.0.0.0", "3493", &hints, &address_info);
+    if (res != 0 || address_info == NULL) {
+        ESP_LOGE(TAG, "couldn't get hostname for 0.0.0.0 getaddrinfo() returns %d, addrinfo=%p", res, address_info);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    listen_sock = socket(address_info->ai_family, address_info->ai_socktype, address_info->ai_protocol);
+    if (listen_sock < 0) {
+        log_socket_error(TAG, listen_sock, errno, "Unable to create socket");
+        free(address_info);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "Listener socket created");
+
+    int flags = fcntl(listen_sock, F_GETFL);
+    if (fcntl(listen_sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+        log_socket_error(TAG, listen_sock, errno, "Unable to set socket non blocking");
+        close(listen_sock);
+        free(address_info);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int err = bind(listen_sock, address_info->ai_addr, address_info->ai_addrlen);
+    if (err != 0) {
+        log_socket_error(TAG, listen_sock, errno, "Socket unable to bind");
+        close(listen_sock);
+        free(address_info);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "Socket bound on 0.0.0.0:3493");
+
+    err = listen(listen_sock, 1);
+    if (err != 0) {
+        log_socket_error(TAG, listen_sock, errno, "Error occurred during listen");
+        close(listen_sock);
+        free(address_info);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "Socket listening");
+    free(address_info);
+
+    while (1) {
+        struct sockaddr_storage source_addr;
+        socklen_t addr_len = sizeof(source_addr);
+        int new_sock_index = 0;
+        for (new_sock_index = 0; new_sock_index < max_socks; ++new_sock_index) {
+            if (sock[new_sock_index] == INVALID_SOCK) {
+                break;
+            }
+        }
+        if (new_sock_index < max_socks) {
+            sock[new_sock_index] = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+            if (sock[new_sock_index] >= 0) {
+                ESP_LOGI(TAG, "[sock=%d]: Connection accepted from IP:%s", sock[new_sock_index], get_clients_address(&source_addr));
+                int flags = fcntl(sock[new_sock_index], F_GETFL);
+                fcntl(sock[new_sock_index], F_SETFL, flags | O_NONBLOCK);
+            }
+        }
+        for (int i = 0; i < max_socks; ++i) {
+            if (sock[i] != INVALID_SOCK) {
+                int len = try_receive(TAG, sock[i], rx_buffer, sizeof(rx_buffer));
+                if (len < 0) {
+                    ESP_LOGI(TAG, "[sock=%d]: try_receive() returned %d -> closing the socket", sock[i], len);
+                    close(sock[i]);
+                    sock[i] = INVALID_SOCK;
+                } else if (len > 0) {
+                    ESP_LOGI(TAG, "[NUT] RX from client: %.*s", len, rx_buffer);
+                    // For now, always respond with a simple placeholder
+                    const char *response = "OK\n";
+                    int sent = send(sock[i], response, strlen(response), 0);
+                    ESP_LOGI(TAG, "[sock=%d]: Sent response (%d bytes): %s", sock[i], sent, response);
+                    if (sent < 0) {
+                        ESP_LOGE(TAG, "[sock=%d]: Failed to send response: %s", sock[i], strerror(errno));
+                        close(sock[i]);
+                        sock[i] = INVALID_SOCK;
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(YIELD_TO_ALL_MS));
+    }
+    // Cleanup (should not reach here)
+    if (listen_sock != INVALID_SOCK) {
+        close(listen_sock);
+    }
+    for (int i = 0; i < max_socks; ++i) {
+        if (sock[i] != INVALID_SOCK) {
+            close(sock[i]);
+        }
+    }
     vTaskDelete(NULL);
 }
 
@@ -364,6 +545,17 @@ static void hid_host_generic_report_callback(const uint8_t *const data, const in
     
     uint8_t report_id = data[0];
     
+    // Update UPS state and timestamp
+    ups_last_data_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (ups_state == UPS_DISCONNECTED || ups_state == UPS_CONNECTED_WAITING_DATA) {
+        ups_state = UPS_CONNECTED_ACTIVE;
+        ups_available = true;
+        ESP_LOGI(TAG, "UPS state: DISCONNECTED/WAITING -> ACTIVE");
+    } else if (ups_state == UPS_CONNECTED_STALE) {
+        ups_state = UPS_CONNECTED_ACTIVE;
+        ESP_LOGI(TAG, "UPS state: STALE -> ACTIVE");
+    }
+    
 #if VERBOSE_UPS_LOGGING
     ESP_LOGI(TAG, "=== PARSING REPORT 0x%02X (Length: %d) ===", report_id, length);
     
@@ -381,109 +573,120 @@ static void hid_host_generic_report_callback(const uint8_t *const data, const in
         case 0x20:  // Battery and Load Status
             ESP_LOGI(TAG, "Report 0x20 - Battery/Status Data:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Battery Level: %d%%", data[1]);
+                ups_data.battery_level = data[1];
+                ESP_LOGI(TAG, "  Battery Level: %d%%", ups_data.battery_level);
             }
             if (length >= 3) {
-                ESP_LOGI(TAG, "  Battery Byte2: %d", data[2]);
+                ups_data.battery_byte2 = data[2];
+                ESP_LOGI(TAG, "  Battery Byte2: %d", ups_data.battery_byte2);
             }
             if (length >= 4) {
-                ESP_LOGI(TAG, "  Battery Byte3: %d", data[3]);
+                ups_data.battery_byte3 = data[3];
+                ESP_LOGI(TAG, "  Battery Byte3: %d", ups_data.battery_byte3);
             }
             break;
             
         case 0x21:  // Status Flags
             ESP_LOGI(TAG, "Report 0x21 - Status Flags:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Status: %d", data[1]);
+                ups_data.status = data[1];
+                ESP_LOGI(TAG, "  Status: %d", ups_data.status);
             }
             if (length >= 3) {
-                ESP_LOGI(TAG, "  Status Byte2: %d", data[2]);
+                ups_data.status_byte2 = data[2];
+                ESP_LOGI(TAG, "  Status Byte2: %d", ups_data.status_byte2);
             }
             break;
             
         case 0x22:  // Runtime
             ESP_LOGI(TAG, "Report 0x22 - Runtime Data:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Runtime: %d minutes", data[1]);
+                ups_data.runtime = data[1];
+                ESP_LOGI(TAG, "  Runtime: %d minutes", ups_data.runtime);
             }
             break;
             
         case 0x23:  // Voltage Data
             ESP_LOGI(TAG, "Report 0x23 - Voltage Data:");
             if (length >= 3) {
-                uint16_t voltage1 = (data[2] << 8) | data[1];
-                ESP_LOGI(TAG, "  Input Voltage: %d V", voltage1);
+                ups_data.input_voltage = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Input Voltage: %d V", ups_data.input_voltage);
             }
             if (length >= 5) {
-                uint16_t voltage2 = (data[4] << 8) | data[3];
-                ESP_LOGI(TAG, "  Output Voltage: %d V", voltage2);
+                ups_data.output_voltage = (data[4] << 8) | data[3];
+                ESP_LOGI(TAG, "  Output Voltage: %d V", ups_data.output_voltage);
             }
             break;
             
         case 0x25:  // Load Percentage
             ESP_LOGI(TAG, "Report 0x25 - Load Data:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Load: %d%%", data[1]);
+                ups_data.load = data[1];
+                ESP_LOGI(TAG, "  Load: %d%%", ups_data.load);
             }
             break;
             
         case 0x28:  // Alarm Control
             ESP_LOGI(TAG, "Report 0x28 - Alarm Control:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Alarm Control: %d", data[1]);
+                ups_data.alarm_control = data[1];
+                ESP_LOGI(TAG, "  Alarm Control: %d", ups_data.alarm_control);
             }
             break;
             
         case 0x29:  // Beep Control
             ESP_LOGI(TAG, "Report 0x29 - Beep Control:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Beep Control: %d", data[1]);
+                ups_data.beep_control = data[1];
+                ESP_LOGI(TAG, "  Beep Control: %d", ups_data.beep_control);
             }
             break;
             
         case 0x80:  // System Status
             ESP_LOGI(TAG, "Report 0x80 - System Status:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  System Status: %d", data[1]);
+                ups_data.system_status = data[1];
+                ESP_LOGI(TAG, "  System Status: %d", ups_data.system_status);
             }
             break;
             
         case 0x82:  // Extended Status
             ESP_LOGI(TAG, "Report 0x82 - Extended Status:");
             if (length >= 3) {
-                uint16_t ext_status = (data[2] << 8) | data[1];
-                ESP_LOGI(TAG, "  Extended Status: %d", ext_status);
+                ups_data.extended_status = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Extended Status: %d", ups_data.extended_status);
             }
             break;
             
         case 0x85:  // Temperature/Sensor
             ESP_LOGI(TAG, "Report 0x85 - Temperature/Sensor:");
             if (length >= 2) {
-                ESP_LOGI(TAG, "  Temperature: %d", data[1]);
+                ups_data.temperature = data[1];
+                ESP_LOGI(TAG, "  Temperature: %d", ups_data.temperature);
             }
             break;
             
         case 0x86:  // Temperature Range 1
             ESP_LOGI(TAG, "Report 0x86 - Temperature Range 1:");
             if (length >= 3) {
-                uint16_t temp_range = (data[2] << 8) | data[1];
-                ESP_LOGI(TAG, "  Temp Range 1: %d", temp_range);
+                ups_data.temp_range1 = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Temp Range 1: %d", ups_data.temp_range1);
             }
             break;
             
         case 0x87:  // Temperature Range 2
             ESP_LOGI(TAG, "Report 0x87 - Temperature Range 2:");
             if (length >= 3) {
-                uint16_t temp_range = (data[2] << 8) | data[1];
-                ESP_LOGI(TAG, "  Temp Range 2: %d", temp_range);
+                ups_data.temp_range2 = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Temp Range 2: %d", ups_data.temp_range2);
             }
             break;
             
         case 0x88:  // Additional Sensor
             ESP_LOGI(TAG, "Report 0x88 - Additional Sensor:");
             if (length >= 3) {
-                uint16_t sensor_value = (data[2] << 8) | data[1];
-                ESP_LOGI(TAG, "  Additional Sensor: %d", sensor_value);
+                ups_data.additional_sensor = (data[2] << 8) | data[1];
+                ESP_LOGI(TAG, "  Additional Sensor: %d", ups_data.additional_sensor);
             }
             break;
             
@@ -501,6 +704,20 @@ static void hid_host_generic_report_callback(const uint8_t *const data, const in
 #if VERBOSE_UPS_LOGGING
     ESP_LOGI(TAG, "=============================");
 #endif
+
+    // Print current UPS data state after each report
+    ESP_LOGI(TAG, "=== CURRENT UPS DATA STATE ===");
+    ESP_LOGI(TAG, "State: %d, Available: %s, Last Data: %lu ms ago (timeout: %d ms)", 
+             ups_state, ups_available ? "YES" : "NO", 
+             xTaskGetTickCount() * portTICK_PERIOD_MS - ups_last_data_time,
+             UPS_DATA_FRESHNESS_TIMEOUT_MS);
+    ESP_LOGI(TAG, "Battery: %d%%, Load: %d%%, Runtime: %d min", 
+             ups_data.battery_level, ups_data.load, ups_data.runtime);
+    ESP_LOGI(TAG, "Input: %d V, Output: %d V, Temp: %d", 
+             ups_data.input_voltage, ups_data.output_voltage, ups_data.temperature);
+    ESP_LOGI(TAG, "Status: %d, System: %d, Extended: %d", 
+             ups_data.status, ups_data.system_status, ups_data.extended_status);
+    ESP_LOGI(TAG, "=============================");
 }
 
 /**
@@ -538,6 +755,7 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
                 waiting_for_initial_data = false;
                 latest_hid_device_handle = hid_device_handle;
                 UPS_DEV_CONNECTED = true;
+                ups_state = UPS_CONNECTED_WAITING_DATA;
                 ESP_LOGI(TAG, "UPS data detected, sending to parsing logic");
                 
                 ESP_LOGI(TAG, "=== UPS PARSING INITIALIZED ===");
@@ -569,6 +787,9 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
         
         if (hid_device_handle == latest_hid_device_handle) {
             UPS_DEV_CONNECTED = false;
+            ups_state = UPS_DISCONNECTED;
+            ups_available = false;
+            ESP_LOGI(TAG, "UPS state: -> DISCONNECTED");
         }
         
         ESP_LOGI(TAG, "USB device disconnected correctly");
@@ -1081,6 +1302,13 @@ void app_main(void)
     task_created = xTaskCreate(&hid_host_task, "hid_task", 4 * 1024, NULL, 2, NULL);
     //configure_led();
     task_created = xTaskCreate(&timer_task, "timer_task", 4 * 1024, NULL, 8, NULL);
+    assert(task_created == pdTRUE);
+    // Start TCP server for NUT protocol
+    task_created = xTaskCreate(&tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
+    assert(task_created == pdTRUE);
+    
+    // Start UPS freshness timer task
+    task_created = xTaskCreate(ups_freshness_timer_task, "ups_timer", 2048, NULL, 3, NULL);
     assert(task_created == pdTRUE);
 }
 
