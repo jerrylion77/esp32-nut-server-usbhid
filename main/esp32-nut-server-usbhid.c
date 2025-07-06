@@ -44,6 +44,18 @@
 
 #include <inttypes.h>
 
+#include "esp_timer.h"
+
+// === LED Function Prototypes ===
+static void configure_led(void);
+static void set_led_green(void);
+static void set_led_yellow(void);
+static void set_led_red(void);
+static void set_led_white(void);
+static void update_led_status(void);
+static void update_led_with_pulse(void);
+static void pulse_timer_callback(void* arg);
+
 // === UPS Data Storage and State Management ===
 #include <stdbool.h>
 #include <stdint.h>
@@ -85,6 +97,16 @@ static ups_data_store_t ups_data = {0};
 static uint32_t ups_last_data_time = 0;  // ms since boot
 static bool ups_available = false;
 
+// --- LED Pulse Tracking Variables (Cosmetic, Safe to Remove) ---
+// These are only used for the RGB LED status indicator. If you want to disable LED logic,
+// you can comment out or remove all code that references these variables and the related functions.
+static uint32_t last_field_update_time = 0;  // ms since boot
+static uint32_t last_pulse_time = 0;         // ms since boot
+static bool pulse_in_progress = false;
+static const uint32_t PULSE_INTERVAL_MS = 30000;  // 30 seconds
+static const uint32_t PULSE_DURATION_MS = 1000;   // 1 second white flash
+// --- End LED Pulse Tracking Variables ---
+
 // Background timer task for UPS data freshness checking
 static void ups_freshness_timer_task(void *pvParameters)
 {
@@ -100,6 +122,7 @@ static void ups_freshness_timer_task(void *pvParameters)
             ups_state = UPS_CONNECTED_STALE;
             ups_available = false;
             ESP_LOGW(TAG, "UPS state: ACTIVE -> STALE (no data for %lu ms)", time_since_last_data);
+            update_led_with_pulse();  // Update LED when UPS becomes stale
         }
         
         // Log current state every 30 seconds for debugging
@@ -154,6 +177,13 @@ static uint32_t extract_multi_byte_value(const uint8_t *data, const hid_report_m
 static void update_json_with_ups_data(const ups_data_t *data);
 static void debug_unknown_ups_model(hid_host_device_handle_t device_handle);
 static void refresh_ups_status_from_hid(bool *beep);
+
+// Pulse timer callback function
+static void pulse_timer_callback(void* arg)
+{
+    pulse_in_progress = false;
+    update_led_status();  // Return to base color
+}
 
 /* It is use for change beep status */
 #define APP_QUIT_PIN GPIO_NUM_0
@@ -694,13 +724,20 @@ static void hid_host_generic_report_callback(const uint8_t *const data, const in
     
     // Update UPS state and timestamp
     ups_last_data_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    last_field_update_time = ups_last_data_time;  // Track field update time for LED pulse
+    
     if (ups_state == UPS_DISCONNECTED || ups_state == UPS_CONNECTED_WAITING_DATA) {
         ups_state = UPS_CONNECTED_ACTIVE;
         ups_available = true;
         ESP_LOGI(TAG, "UPS state: DISCONNECTED/WAITING -> ACTIVE");
+        update_led_with_pulse();  // Update LED with pulse logic when UPS becomes active
     } else if (ups_state == UPS_CONNECTED_STALE) {
         ups_state = UPS_CONNECTED_ACTIVE;
         ESP_LOGI(TAG, "UPS state: STALE -> ACTIVE");
+        update_led_with_pulse();  // Update LED with pulse logic when UPS becomes active
+    } else {
+        // UPS was already active, just update LED with pulse logic
+        update_led_with_pulse();
     }
     
 #if VERBOSE_UPS_LOGGING
@@ -933,9 +970,10 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
         }
         
         if (hid_device_handle == latest_hid_device_handle) {
-        UPS_DEV_CONNECTED = false;
-            ups_state = UPS_DISCONNECTED;
-            ups_available = false;
+                UPS_DEV_CONNECTED = false;
+        ups_state = UPS_DISCONNECTED;
+        ups_available = false;
+        update_led_with_pulse();  // Update LED when UPS disconnects
             ESP_LOGI(TAG, "UPS state: -> DISCONNECTED");
         }
         
@@ -1174,15 +1212,46 @@ static void __attribute__((unused)) configure_led(void)
     /* LED strip initialization with the GPIO and pixels number*/
     led_strip_config_t strip_config = {
         .strip_gpio_num = RGB_LED_PIN,
-        .max_leds = 1, // at least one LED on board
+        .max_leds = 1, // Single RGB LED on board
+        .flags.invert_out = false,
     };
     led_strip_rmt_config_t rmt_config = {
         .resolution_hz = 10 * 1000 * 1000, // 10MHz
+        .flags.with_dma = false,
     };
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
     /* Set all LED off to clear all pixels */
     led_strip_clear(led_strip);
+    /* Ensure the LED is properly initialized */
+    led_strip_refresh(led_strip);
 }
+
+// LED Status Functions
+static void set_led_green(void)
+{
+    led_strip_set_pixel(led_strip, 0, 0, 255, 0);  // Green
+    led_strip_refresh(led_strip);
+}
+
+static void set_led_yellow(void)
+{
+    led_strip_set_pixel(led_strip, 0, 255, 255, 0);  // Yellow
+    led_strip_refresh(led_strip);
+}
+
+static void set_led_red(void)
+{
+    led_strip_set_pixel(led_strip, 0, 255, 0, 0);  // Red
+    led_strip_refresh(led_strip);
+}
+
+static void set_led_white(void)
+{
+    led_strip_set_pixel(led_strip, 0, 255, 255, 255);  // White
+    led_strip_refresh(led_strip);
+}
+
+
 
 // WiFi Configuration - Layer 1: Reliable WiFi Connection
 #include "wifi_secrets.h" // <-- User must create this file with their WiFi credentials
@@ -1198,6 +1267,69 @@ static EventGroupHandle_t wifi_event_group;
 static const int WIFI_CONNECTED_BIT = BIT0;
 static const int WIFI_FAIL_BIT = BIT1;
 
+// LED Status Functions - RESILIENT VERSION
+static void update_led_status(void)
+{
+    // Safe defaults - assume worst case if variables not initialized
+    bool wifi_ok = false;
+    bool ups_ok = false;
+    
+    // Safely check WiFi status
+    if (wifi_connected) {
+        wifi_ok = true;
+    }
+    
+    // Safely check UPS status
+    if (ups_state == UPS_CONNECTED_ACTIVE && ups_available) {
+        ups_ok = true;
+    }
+    
+    if (wifi_ok && ups_ok) {
+        // Green: All good
+        set_led_green();
+    } else if (!wifi_ok && !ups_ok) {
+        // Red: All fucked up
+        set_led_red();
+    } else {
+        // Yellow: Something wrong (one of them is not OK)
+        set_led_yellow();
+    }
+}
+
+static void update_led_with_pulse(void)
+{
+    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    
+    // Check if we should show a white pulse
+    if (!pulse_in_progress && 
+        last_field_update_time > last_pulse_time && 
+        (current_time - last_pulse_time) >= PULSE_INTERVAL_MS) {
+        
+        // Start white pulse
+        pulse_in_progress = true;
+        last_pulse_time = current_time;
+        set_led_white();
+        
+        // Schedule return to base color after pulse duration
+        esp_timer_handle_t pulse_timer;
+        esp_timer_create_args_t timer_args = {
+            .callback = pulse_timer_callback,
+            .arg = NULL,
+            .name = "pulse_timer"
+        };
+        esp_timer_create(&timer_args, &pulse_timer);
+        esp_timer_start_once(pulse_timer, PULSE_DURATION_MS * 1000);  // Convert to microseconds
+        esp_timer_delete(pulse_timer);
+        
+        return;
+    }
+    
+    // If no pulse needed, show base status
+    if (!pulse_in_progress) {
+        update_led_status();
+    }
+}
+
 // WiFi event handler
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -1207,6 +1339,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_connected = false;
+        update_led_with_pulse();  // Update LED when WiFi disconnects
         if (wifi_retry_count < WIFI_MAXIMUM_RETRY) {
             ESP_LOGI(TAG, "WiFi disconnected, retrying... (attempt %d/%d)", 
                      wifi_retry_count + 1, WIFI_MAXIMUM_RETRY);
@@ -1222,6 +1355,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         wifi_connected = true;
         wifi_retry_count = 0;
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+        update_led_with_pulse();  // Update LED when WiFi connects
     }
 }
 
@@ -1394,6 +1528,9 @@ void connect_to_wifi(void)
     xTaskCreate(wifi_reconnect_task, "wifi_reconnect", 4096, NULL, 5, NULL);
     
     ESP_LOGI(TAG, "WiFi connection established and monitoring started");
+    
+    // Initial LED status update
+    update_led_with_pulse();
 }
 
 void app_main(void)
@@ -1448,7 +1585,7 @@ void app_main(void)
     ESP_ERROR_CHECK(hid_host_install(&hid_host_driver_config));
     user_shutdown = false;
     task_created = xTaskCreate(&hid_host_task, "hid_task", 4 * 1024, NULL, 2, NULL);
-    //configure_led();
+    configure_led();
     task_created = xTaskCreate(&timer_task, "timer_task", 4 * 1024, NULL, 8, NULL);
     assert(task_created == pdTRUE);
     // Start TCP server for NUT protocol

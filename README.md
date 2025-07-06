@@ -57,16 +57,16 @@ The firmware extracts and serves **17 real-time variables** from CyberPower UPS:
 - `ups.alarm.control` - Alarm control settings
 - `ups.beep.control` - Beep control settings
 
-## 🎨 **LED Status System (Planned)**
+## 🎨 **LED Status System ✅**
 
-The firmware will include a modular LED status system that can be called to change colors based on system state:
+The firmware includes a comprehensive LED status system that provides real-time visual feedback:
 
-- **Green**: UPS connected and healthy
-- **Orange**: UPS disconnected
-- **Red**: UPS error or AC power loss
-- **Blue**: WiFi connecting
-- **White**: NUT client activity
-- **Purple**: System error/reboot
+- **Green**: All systems healthy (WiFi connected + UPS active)
+- **Yellow**: Partial system issues (WiFi or UPS has problems)
+- **Red**: Critical failure (both WiFi and UPS disconnected)
+- **White**: Data activity pulse (indicates fresh UPS data received)
+
+The LED automatically updates based on WiFi connection status and UPS data freshness, with a pulsing white indicator when new UPS data is received.
 
 ## 🏗️ **Architecture**
 
@@ -103,7 +103,7 @@ The firmware will include a modular LED status system that can be called to chan
 - [x] CyberPower-specific parsing
 - [x] NUT server implementation
 - [x] Home Assistant integration
-- [ ] LED status system
+- [x] LED status system
 - [x] Production optimization
 
 ## 🔧 **Setup Instructions**
@@ -166,6 +166,6 @@ GPL-3.0 (inherited from original project)
 
 ---
 
-**Note**: This firmware is now production-ready for CyberPower VP700ELCD/VP1000ELCD UPS models with Home Assistant integration.
+**Note**: This firmware is now production-ready for CyberPower VP700ELCD/VP1000ELCD UPS models with Home Assistant integration. The LED status system provides real-time visual feedback for system health monitoring.
 
 For detailed technical information, video demos, and original implementation details, please visit the [original repository](https://github.com/ludoux/esp32-nut-server-usbhid).
