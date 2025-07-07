@@ -13,7 +13,7 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 3. **Implements CyberPower HID protocol** based on reverse engineering ✅
 4. **Provides stable NUT server** for Home Assistant integration ✅
 5. **Includes modular LED status system** for visual feedback ✅
-6. **Webserver: In progress**
+6. **Webserver: in progress (WiFi settings, factory restore, WiFi status, and UPS status are complete; TCP status, system health, and overall device status are next)**
 7. **Maintains clean, maintainable code** with proper error handling ✅
 
 ## 🔧 **Key Improvements Over Original**
@@ -93,7 +93,7 @@ The LED automatically updates based on WiFi connection status and UPS data fresh
 
 ```
 ┌─────────────────────────────────────┐
-│ 7. Webserver (planned)              │
+│ 7. Webserver: In progress            │
 ├─────────────────────────────────────┤
 │ 6. LED Status System ✅             │
 ├─────────────────────────────────────┤
