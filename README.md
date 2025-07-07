@@ -10,7 +10,7 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 
 1. **Reliably connects to WiFi** with automatic reconnection ✅
 2. **Accurately reads USB HID data** from CyberPower UPS devices ✅
-3. **Implements proper CyberPower HID protocol** based on official MIB specifications ✅
+3. **Implements CyberPower HID protocol** based on reverse engineering ✅
 4. **Provides stable NUT server** for Home Assistant integration ✅
 5. **Includes modular LED status system** for visual feedback ✅
 6. **Webserver for basic configuration and remote monitoring** (planned)
@@ -18,9 +18,9 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 
 ## 🔧 **Key Improvements Over Original**
 
-- **CyberPower-specific HID parsing** using official MIB documentation ✅
+- **CyberPower-specific HID parsing** using reverse engineering and protocol analysis ✅
 - **Complete NUT protocol implementation** with authentication support ✅
-- **17 real-time UPS variables** extracted and served via NUT ✅
+- **18 UPS variables** extracted and served via NUT (12 dynamic + 6 static) ✅
 - **Proper error handling** and fail-safe device detection ✅
 - **Home Assistant compatibility** with automatic discovery ✅
 - **Reliable WiFi reconnection** handling ✅
@@ -28,35 +28,55 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 
 ## 📊 **Supported UPS Variables**
 
-The firmware extracts and serves **17 real-time variables** from CyberPower UPS:
+The firmware serves **18 variables** via NUT protocol:
 
-### **Battery Information**
+### **12 Dynamic Variables** (parsed from UPS data)
 - `battery.charge` - Battery level percentage (0-100%)
 - `battery.runtime` - Runtime remaining in minutes
 - `battery.temperature` - Battery temperature in °C
-- `battery.type` - Battery type (PbAc)
-
-### **Power Information**
 - `input.voltage` - Input voltage in V
 - `output.voltage` - Output voltage in V
 - `ups.load` - Load percentage (0-100%)
-- `ups.power.nominal` - Nominal power rating (700W)
-
-### **Status Information**
-- `ups.status` - Online/Offline status (OL/OB)
+- `ups.status` - Online/Offline status (OL/UNKNOWN)
 - `ups.status.flags` - Status flags from UPS
 - `ups.system.status` - System status code
 - `ups.extended.status` - Extended status information
+- `ups.alarm.control` - Alarm control settings
+- `ups.beep.control` - Beep control settings
 
-### **Device Information**
+### **6 Static Variables** (hardcoded for compatibility)
 - `device.mfr` - Manufacturer (CyberPower)
 - `device.model` - Model (VP700ELCD)
 - `device.type` - Device type (ups)
-- `ups.firmware` - Firmware version
+- `ups.firmware` - Firmware version (1.0)
+- `battery.type` - Battery type (PbAc)
+- `ups.power.nominal` - Nominal power rating (700W)
 
-### **Control Information**
-- `ups.alarm.control` - Alarm control settings
-- `ups.beep.control` - Beep control settings
+### **6 Additional Parsed Fields** (for debugging/development)
+- `battery_byte2`, `battery_byte3` - Raw battery data bytes
+- `status_byte2` - Raw status data byte
+- `temp_range1`, `temp_range2` - Temperature range data
+- `additional_sensor` - Additional sensor data
+
+**Note:** Home Assistant NUT integration currently recognizes only **10 entities** despite the firmware providing 18 variables. This is a limitation of the Home Assistant integration, not the firmware.
+
+## ⚠️ **Known Limitations**
+
+### **Protocol Reverse Engineering**
+- The UPS HID protocol parsing is based on **reverse engineering** and may contain inaccuracies
+- No official manufacturer documentation (MIB files) was used for this implementation
+- Some data fields may be misinterpreted or missing
+- **Contributions to improve protocol understanding are welcome!**
+
+### **Home Assistant Integration**
+- Home Assistant NUT integration only recognizes **10 entities** out of 18 available variables
+- Recognized entities: Battery charge, Input voltage, Load, Output voltage, Status, Status data, Battery chemistry, Battery runtime, Battery temperature, Nominal power
+- Additional variables (status flags, system status, alarm/beep controls) are available via NUT but not exposed in Home Assistant
+
+### **Supported Models**
+- Currently tested with CyberPower VP700ELCD and VP1000ELCD
+- Other CyberPower models may work but are untested
+- Non-CyberPower UPS models are not supported
 
 ## 🎨 **LED Status System ✅**
 
@@ -153,10 +173,40 @@ LIST UPS
 LIST VAR VP700ELCD
 ```
 
+## 🤝 **Contributing**
+
+We welcome contributions to improve this project! Areas that need help:
+
+### **Protocol Improvements**
+- **UPS Protocol Analysis**: Help improve the reverse-engineered HID protocol parsing
+- **Additional UPS Models**: Test and add support for other CyberPower models
+- **Data Field Validation**: Verify the accuracy of parsed data fields
+
+### **Feature Development**
+- **Webserver Implementation**: Help build the planned configuration web interface
+- **Enhanced Monitoring**: Add more detailed UPS diagnostics and alerts
+- **Performance Optimization**: Improve parsing efficiency and memory usage
+
+### **Documentation**
+- **Setup Guides**: Create guides for different UPS models and configurations
+- **Troubleshooting**: Document common issues and solutions
+- **API Documentation**: Document the NUT server implementation
+
+### **Testing**
+- **Hardware Testing**: Test with different CyberPower UPS models
+- **Integration Testing**: Verify Home Assistant and other NUT client compatibility
+- **Stress Testing**: Test reliability under various network and power conditions
+
+**How to Contribute:**
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
 ## 📚 **Documentation References**
 
 - [USB HID Power Devices Specification](https://www.usb.org/sites/default/files/pdcv10_0.pdf)
-- [CyberPower MIB Documentation](https://www.cyberpowersystems.com/products/software/mib-files/)
 - [NUT CyberPower Driver](https://github.com/networkupstools/nut/blob/master/drivers/cyberpower-mib.c)
 - [Original Project Documentation](https://github.com/ludoux/esp32-nut-server-usbhid)
 
