@@ -28,7 +28,6 @@
 #include "esp_system.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
-#include "protocol_examples_common.h"
 
 #include "led_strip.h"
 
@@ -46,12 +45,27 @@
 
 #include "esp_timer.h"
 
+#include "webserver.h"
+
+// === WiFi NVS Management ===
+#define WIFI_NVS_NAMESPACE "wifi_config"
+#define WIFI_SSID_KEY "ssid"
+#define WIFI_PASS_KEY "password"
+
+// === WiFi NVS Management Function Prototypes ===
+static esp_err_t load_wifi_credentials_from_nvs(char* ssid, char* password, size_t max_len);
+
+// === Button Function Prototypes ===
+static void button_monitor_task(void* pvParameters);
+
 // === LED Function Prototypes ===
 static void configure_led(void);
 static void set_led_green(void);
 static void set_led_yellow(void);
 static void set_led_red(void);
 static void set_led_white(void);
+static void set_led_purple(void);
+static void set_led_blue(void);
 static void update_led_status(void);
 static void update_led_with_pulse(void);
 static void pulse_timer_callback(void* arg);
@@ -970,7 +984,7 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
         }
         
         if (hid_device_handle == latest_hid_device_handle) {
-                UPS_DEV_CONNECTED = false;
+        UPS_DEV_CONNECTED = false;
         ups_state = UPS_DISCONNECTED;
         ups_available = false;
         update_led_with_pulse();  // Update LED when UPS disconnects
@@ -1251,6 +1265,30 @@ static void set_led_white(void)
     led_strip_refresh(led_strip);
 }
 
+static void set_led_purple(void)
+{
+    if (led_strip) {
+        esp_err_t ret = led_strip_set_pixel(led_strip, 0, 255, 0, 255);  // Purple
+        if (ret == ESP_OK) {
+            led_strip_refresh(led_strip);
+        } else {
+            ESP_LOGE(TAG, "Failed to set LED purple: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+static void set_led_blue(void)
+{
+    if (led_strip) {
+        esp_err_t ret = led_strip_set_pixel(led_strip, 0, 0, 0, 255);  // Blue
+        if (ret == ESP_OK) {
+            led_strip_refresh(led_strip);
+        } else {
+            ESP_LOGE(TAG, "Failed to set LED blue: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
 
 
 // WiFi Configuration - Layer 1: Reliable WiFi Connection
@@ -1393,11 +1431,22 @@ static esp_err_t wifi_init(void)
                                                         NULL,
                                                         NULL));
     
+    // Load WiFi credentials from NVS or use hardcoded fallback
+    char ssid[32] = {0};
+    char password[64] = {0};
+    esp_err_t nvs_err = load_wifi_credentials_from_nvs(ssid, password, sizeof(ssid));
+    if (nvs_err == ESP_OK) {
+        ESP_LOGI(TAG, "Using WiFi credentials from NVS");
+    } else {
+        // Fall back to hardcoded credentials
+        strcpy(ssid, WIFI_SSID);
+        strcpy(password, WIFI_PASSWORD);
+        ESP_LOGI(TAG, "Using hardcoded WiFi credentials (NVS not available)");
+    }
+    
     // Configure WiFi
     wifi_config_t wifi_config = {
         .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
             .pmf_cfg = {
                 .capable = true,
@@ -1405,6 +1454,10 @@ static esp_err_t wifi_init(void)
             },
         },
     };
+    
+    // Copy credentials to wifi_config
+    strcpy((char*)wifi_config.sta.ssid, ssid);
+    strcpy((char*)wifi_config.sta.password, password);
     
     // Set WiFi mode and config
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -1420,7 +1473,15 @@ static esp_err_t wifi_init(void)
 // Connect to WiFi with timeout
 static esp_err_t wifi_connect_with_timeout(int timeout_ms)
 {
-    ESP_LOGI(TAG, "Connecting to WiFi: %s", WIFI_SSID);
+    // Load current WiFi credentials for logging
+    char ssid[32] = {0};
+    char password[64] = {0};
+    esp_err_t nvs_err = load_wifi_credentials_from_nvs(ssid, password, sizeof(ssid));
+    if (nvs_err == ESP_OK) {
+        ESP_LOGI(TAG, "Connecting to WiFi: %s (from NVS)", ssid);
+    } else {
+        ESP_LOGI(TAG, "Connecting to WiFi: %s (hardcoded)", WIFI_SSID);
+    }
     
     // Reset retry count
     wifi_retry_count = 0;
@@ -1538,10 +1599,26 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    
+    // Configure BOOT button (GPIO 0) for continuous monitoring
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_0),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    
+    ESP_LOGI(TAG, "BOOT button configured for continuous monitoring");
+    
     //init_json_object();
     //ESP_ERROR_CHECK(init_generic_ups_models());
     //connect_to_wifi();
     connect_to_wifi();
+    
+    // Start button monitoring task
+    xTaskCreate(button_monitor_task, "button_monitor", 2048, NULL, 5, NULL);
     //SemaphoreHandle_t server_ready = xSemaphoreCreateBinary();
     //assert(server_ready);
     //xTaskCreate(tcp_server_task, "tcp_server", 4096, &server_ready, 5, NULL);
@@ -1595,6 +1672,12 @@ void app_main(void)
     // Start UPS freshness timer task
     task_created = xTaskCreate(ups_freshness_timer_task, "ups_timer", 2048, NULL, 3, NULL);
     assert(task_created == pdTRUE);
+    
+    // Start webserver
+    esp_err_t ret = webserver_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start webserver: %s", esp_err_to_name(ret));
+    }
 }
 
 //static const char *TAG = "wifi";
@@ -1672,6 +1755,113 @@ static void __attribute__((unused)) debug_unknown_ups_model(hid_host_device_hand
 {
     // DISABLED - depends on stored data
     ESP_LOGI(TAG, "debug_unknown_ups_model disabled - no data storage in current implementation");
+}
+
+// Load WiFi credentials from NVS
+static esp_err_t load_wifi_credentials_from_nvs(char* ssid, char* password, size_t max_len)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not open NVS handle for WiFi config: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    size_t ssid_len = max_len;
+    size_t pass_len = max_len;
+    
+    err = nvs_get_str(nvs_handle, WIFI_SSID_KEY, ssid, &ssid_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not read SSID from NVS: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return err;
+    }
+    
+    err = nvs_get_str(nvs_handle, WIFI_PASS_KEY, password, &pass_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not read password from NVS: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return err;
+    }
+    
+    nvs_close(nvs_handle);
+    ESP_LOGI(TAG, "Loaded WiFi credentials from NVS: SSID=%s", ssid);
+    return ESP_OK;
+}
+
+// Button monitoring task for WiFi reset
+static void button_monitor_task(void* pvParameters)
+{
+    const int BUTTON_HOLD_TIME_MS = 5000;  // 5 seconds
+    const int CHECK_INTERVAL_MS = 100;     // Check every 100ms
+    
+    TickType_t button_press_start = 0;
+    bool button_was_pressed = false;
+    bool reset_triggered = false;
+    
+    ESP_LOGI(TAG, "Button monitoring task started");
+    
+    while (1) {
+        // Check if BOOT button is pressed (LOW = pressed due to pullup)
+        bool button_pressed = (gpio_get_level(GPIO_NUM_0) == 0);
+        
+        if (button_pressed && !button_was_pressed) {
+            // Button just pressed - start timing
+            button_press_start = xTaskGetTickCount();
+            button_was_pressed = true;
+            ESP_LOGI(TAG, "BOOT button pressed - start monitoring hold time");
+        }
+        else if (button_pressed && button_was_pressed && !reset_triggered) {
+            // Button still held - check if we've reached the hold time
+            TickType_t current_time = xTaskGetTickCount();
+            TickType_t hold_duration = (current_time - button_press_start) * portTICK_PERIOD_MS;
+            
+            if (hold_duration >= BUTTON_HOLD_TIME_MS) {
+                // Button held for 5+ seconds - trigger reset
+                reset_triggered = true;
+                ESP_LOGI(TAG, "BOOT button held for 5 seconds - clearing WiFi credentials and rebooting");
+                
+                // Turn LED blue to indicate it's safe to release button
+                set_led_blue();
+                
+                // Clear WiFi credentials from NVS
+                nvs_handle_t nvs_handle;
+                esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+                if (err == ESP_OK) {
+                    nvs_erase_key(nvs_handle, WIFI_SSID_KEY);
+                    nvs_erase_key(nvs_handle, WIFI_PASS_KEY);
+                    nvs_commit(nvs_handle);
+                    nvs_close(nvs_handle);
+                    ESP_LOGI(TAG, "WiFi credentials cleared from NVS");
+                } else {
+                    ESP_LOGW(TAG, "Failed to clear WiFi credentials: %s", esp_err_to_name(err));
+                }
+                
+                // Wait 2 seconds with blue LED to give user time to release button
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                
+                // Reboot
+                esp_restart();
+            }
+            else if (hold_duration >= 1000) {
+                // Flash purple LED after 1 second to show button is being monitored
+                static TickType_t last_flash = 0;
+                TickType_t current_flash = xTaskGetTickCount();
+                if ((current_flash - last_flash) * portTICK_PERIOD_MS >= 500) {
+                    set_led_purple();
+                    last_flash = current_flash;
+                }
+            }
+        }
+        else if (!button_pressed && button_was_pressed) {
+            // Button released - reset state
+            button_was_pressed = false;
+            reset_triggered = false;
+            ESP_LOGI(TAG, "BOOT button released");
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
+    }
 }
 
 
