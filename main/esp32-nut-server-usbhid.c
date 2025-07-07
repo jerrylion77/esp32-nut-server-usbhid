@@ -1864,5 +1864,14 @@ static void button_monitor_task(void* pvParameters)
     }
 }
 
+// Getter for UPS state
+ups_connection_state_t get_ups_state(void) {
+    return ups_state;
+}
+// Getter for last UPS data time
+unsigned int get_ups_last_data_time(void) {
+    return ups_last_data_time;
+}
+
 
 

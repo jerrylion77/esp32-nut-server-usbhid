@@ -5,17 +5,6 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
-#include "esp_netif.h"
-#include "lwip/ip4_addr.h"
-
-// Add UPS state enum definition for use in this file
-typedef enum {
-    UPS_DISCONNECTED = 0,
-    UPS_CONNECTED_WAITING_DATA,
-    UPS_CONNECTED_ACTIVE,
-    UPS_CONNECTED_STALE
-} ups_connection_state_t;
 
 static const char *TAG = "webserver";
 static httpd_handle_t server = NULL;
@@ -52,11 +41,13 @@ static const char* html_content =
     "        .status { padding: 15px; border-radius: 8px; margin-bottom: 20px; }\n"
     "        .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }\n"
     "        .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }\n"
-    "        .status-indicator { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 8px; vertical-align: middle; background: #bbb; }\n"
+    "        .status-item { margin-bottom: 15px; padding: 10px; border-radius: 5px; background: #f8f9fa; }\n"
+    "        .status-label { font-weight: 600; color: #2c3e50; }\n"
+    "        .status-value { margin-left: 10px; color: #7f8c8d; }\n"
+    "        .status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }\n"
     "        .status-indicator.green { background: #27ae60; }\n"
+    "        .status-indicator.yellow { background: #f39c12; }\n"
     "        .status-indicator.red { background: #e74c3c; }\n"
-    "        .signal-bar { display: inline-block; width: 8px; height: 18px; margin-right: 2px; background: #dfe6e9; border-radius: 2px 2px 0 0; vertical-align: bottom; opacity: 0.5; transition: background 0.2s, opacity 0.2s; }\n"
-    "        .signal-bar.active { background: #3498db; opacity: 1; }\n"
     "        .footer { background: #ecf0f1; padding: 20px 30px; text-align: center; color: #7f8c8d; }\n"
     "    </style>\n"
     "</head>\n"
@@ -64,9 +55,21 @@ static const char* html_content =
     "    <div class=\"container\">\n"
     "        <div class=\"header\">\n"
     "            <h1>ESP32 UPS Monitor & Configuration</h1>\n"
-    "            <p>WiFi Configuration</p>\n"
+    "            <p>System Status Dashboard and WiFi Configuration</p>\n"
     "        </div>\n"
     "        <div class=\"content\">\n"
+    "            <!--\n"
+    "            <div class=\"section\">\n"
+    "                <h2>System Status Dashboard</h2>\n"
+    "                <div class=\"status-row\"><span id=\"wifi-indicator\" class=\"status-indicator green\"></span><span class=\"status-label\">WiFi Status:</span><span id=\"wifi-status\" class=\"status-value\">CONNECTED</span></div>\n"
+    "                <div id=\"wifi-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\">192.168.5.189 | OsoNet (Signal: <span id=\"wifi-signal-bars\"><span class=\"signal-bar active\"></span><span class=\"signal-bar active\"></span><span class=\"signal-bar active\"></span><span class=\"signal-bar\"></span><span class=\"signal-bar\"></span></span> 40%)</div>\n"
+    "                <div class=\"status-row\"><span class=\"status-indicator red\"></span><span class=\"status-label\">UPS Status:</span><span class=\"status-value\">DISCONNECTED</span></div>\n"
+    "                <div style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\">Disconnected</div>\n"
+    "                <div class=\"status-row\"><span class=\"status-indicator yellow\"></span><span class=\"status-label\">LED Status:</span><span class=\"status-value\">YELLOW (Partial system issues)</span></div>\n"
+    "                <div class=\"status-row\"><span class=\"status-indicator green\"></span><span class=\"status-label\">TCP Server:</span><span class=\"status-value\">Running (1 connections)</span></div>\n"
+    "                <div class=\"sys-health\"><b>System Health:</b><br>Memory: 239KB free<br>Uptime: 11 minutes<br>Button: Ready (hold 5s to reset WiFi)</div>\n"
+    "            </div>\n"
+    "            -->\n"
     "            <div class=\"section\">\n"
     "                <h2>WiFi Configuration</h2>\n"
     "                <div id=\"status\"></div>\n"
@@ -97,27 +100,34 @@ static const char* html_content =
     "                    <strong>Note:</strong> This will clear any saved WiFi credentials and restore the original hardcoded settings from the firmware. The LED color changes provide visual feedback: Purple = counting down, Blue = safe to release.\n"
     "                </p>\n"
     "            </div>\n"
-    "            <div class=\"section\" id=\"dashboard-section\">\n"
-    "                <h2>System Status Dashboard</h2>\n"
-    "                <div class=\"status-row\">\n"
-    "                    <span id=\"wifi-indicator\" class=\"status-indicator\"></span>\n"
-    "                    <span class=\"status-label\">WiFi Status:</span>\n"
-    "                    <span id=\"wifi-status\" class=\"status-value\"></span>\n"
-    "                </div>\n"
-    "                <div id=\"wifi-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\"></div>\n"
-    "                <div class=\"status-row\">\n"
-    "                    <span id=\"ups-indicator\" class=\"status-indicator\"></span>\n"
-    "                    <span class=\"status-label\">UPS Status:</span>\n"
-    "                    <span id=\"ups-status\" class=\"status-value\"></span>\n"
-    "                </div>\n"
-    "                <div id=\"ups-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\"></div>\n"
-    "            </div>\n"
     "        </div>\n"
     "        <div class=\"footer\">\n"
     "            <p>ESP32 UPS Server - System Status and Configuration Interface</p>\n"
     "        </div>\n"
     "    </div>\n"
     "    <script>\n"
+    "    function updateWifiStatus() {\n"
+    "        fetch('/api/wifi_status').then(r => r.json()).then(data => {\n"
+    "            var ind = document.getElementById(\"wifi-indicator\");\n"
+    "            ind.className = 'status-indicator ' + (data.connected ? 'green' : 'red');\n"
+    "            document.getElementById(\"wifi-status\").textContent = data.connected ? 'CONNECTED' : 'DISCONNECTED';\n"
+    "            var bars = \"\";\n"
+    "            var percent = 0;\n"
+    "            if (typeof data.signal === 'number') {\n"
+    "                percent = Math.max(0, Math.min(100, 2 * (data.signal + 100)));\n"
+    "                var activeBars = Math.round(percent / 20);\n"
+    "                for (var i = 0; i < 5; ++i) {\n"
+    "                    bars += \"<span class=\\\"signal-bar\"\" + (i < activeBars ? \" active\" : \"\") + \"></span>\";\n"
+    "                }\n"
+    "            }\n"
+    "            var details = data.connected\n"
+    "                ? (data.ip + ' | ' + data.ssid + ' (Signal: <span id=\\\"wifi-signal-bars\\\">' + bars + '</span> ' + percent + '%)')\n"
+    "                : 'Not connected';\n"
+    "            document.getElementById(\"wifi-details\").innerHTML = details;\n"
+    "        });\n"
+    "    }\n"
+    "    updateWifiStatus();\n"
+    "    setInterval(updateWifiStatus, 5000);\n"
     "    document.getElementById('wifiForm').addEventListener('submit', function(e) {\n"
     "        e.preventDefault();\n"
     "        const formData = new FormData(this);\n"
@@ -167,31 +177,6 @@ static const char* html_content =
     "        statusDiv.className = 'status ' + (isSuccess ? 'success' : 'error');\n"
     "        statusDiv.textContent = message;\n"
     "    }\n"
-    "    function updateWifiStatus() {\n"
-    "        fetch('/api/wifi_status').then(r => r.json()).then(data => {\n"
-    "            var ind = document.getElementById(\"wifi-indicator\");\n"
-    "            ind.className = 'status-indicator ' + (data.connected ? 'green' : 'red');\n"
-    "            document.getElementById(\"wifi-status\").textContent = data.connected ? 'CONNECTED' : 'DISCONNECTED';\n"
-    "            var percent = (typeof data.signal === 'number') ? Math.max(0, Math.min(100, 2 * (data.signal + 100))) : 0;\n"
-    "            var details = data.connected\n"
-    "                ? (data.ip + ' | ' + data.ssid + ' (Signal: ' + percent + '%)')\n"
-    "                : 'Not connected';\n"
-    "            document.getElementById(\"wifi-details\").innerHTML = details;\n"
-    "        });\n"
-    "    }\n"
-    "    function updateUpsStatus() {\n"
-    "        fetch('/api/ups_status').then(r => r.json()).then(data => {\n"
-    "            var ind = document.getElementById(\"ups-indicator\");\n"
-    "            ind.className = 'status-indicator ' + data.color;\n"
-    "            document.getElementById(\"ups-status\").textContent = data.state;\n"
-    "            var seconds = (data.ms_since_last / 1000).toFixed(1);\n"
-    "            document.getElementById(\"ups-details\").textContent = 'Last message: ' + seconds + ' seconds ago';\n"
-    "        });\n"
-    "    }\n"
-    "    updateWifiStatus();\n"
-    "    updateUpsStatus();\n"
-    "    setInterval(updateWifiStatus, 5000);\n"
-    "    setInterval(updateUpsStatus, 5000);\n"
     "    </script>\n"
     "</body>\n"
     "</html>";
@@ -323,67 +308,6 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// WiFi status handler
-static esp_err_t wifi_status_get_handler(httpd_req_t *req)
-{
-    wifi_ap_record_t ap_info;
-    esp_netif_ip_info_t ip_info;
-    char response[512];
-    
-    // Get WiFi connection status
-    bool connected = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
-    
-    if (connected) {
-        // Get IP address
-        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-            snprintf(response, sizeof(response),
-                "{\"connected\":true,\"ssid\":\"%s\",\"ip\":\"%u.%u.%u.%u\",\"signal\":%d}",
-                ap_info.ssid,
-                ip4_addr1_16(&ip_info.ip),
-                ip4_addr2_16(&ip_info.ip),
-                ip4_addr3_16(&ip_info.ip),
-                ip4_addr4_16(&ip_info.ip),
-                ap_info.rssi);
-        } else {
-            snprintf(response, sizeof(response),
-                "{\"connected\":true,\"ssid\":\"%s\",\"ip\":\"unknown\",\"signal\":%d}",
-                ap_info.ssid, ap_info.rssi);
-        }
-    } else {
-        snprintf(response, sizeof(response),
-            "{\"connected\":false,\"ssid\":\"\",\"ip\":\"\",\"signal\":0}");
-    }
-    
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-}
-
-// UPS status handler
-static esp_err_t ups_status_get_handler(httpd_req_t *req)
-{
-    extern ups_connection_state_t get_ups_state(void);
-    extern unsigned int get_ups_last_data_time(void);
-    char response[128];
-    const char *state_str = "UNKNOWN";
-    const char *color = "red";
-    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    uint32_t ms_since_last = now - get_ups_last_data_time();
-    switch (get_ups_state()) {
-        case 0: state_str = "DISCONNECTED"; color = "red"; break;
-        case 1: state_str = "WAITING"; color = "yellow"; break;
-        case 2: state_str = "ACTIVE"; color = "green"; break;
-        case 3: state_str = "STALE"; color = "red"; break;
-    }
-    snprintf(response, sizeof(response),
-        "{\"state\":\"%s\",\"color\":\"%s\",\"ms_since_last\":%lu}",
-        state_str, color, (unsigned long)ms_since_last);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-}
-
 // Start the webserver
 esp_err_t webserver_start(void)
 {
@@ -420,22 +344,6 @@ esp_err_t webserver_start(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &reboot_post);
-        
-        httpd_uri_t wifi_status = {
-            .uri = "/api/wifi_status",
-            .method = HTTP_GET,
-            .handler = wifi_status_get_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &wifi_status);
-        
-        httpd_uri_t ups_status = {
-            .uri = "/api/ups_status",
-            .method = HTTP_GET,
-            .handler = ups_status_get_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &ups_status);
         
         ESP_LOGI(TAG, "Webserver started on port %d", config.server_port);
         return ESP_OK;
