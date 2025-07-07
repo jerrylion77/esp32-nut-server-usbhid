@@ -1,0 +1,55 @@
+ESP32 NUT Server Project Summary & Future Prompt
+==================================================
+
+**Project Purpose:**
+- ESP32-S3 firmware acting as a NUT (Network UPS Tools) server for CyberPower UPS (VP700ELCD/VP1000ELCD) via USB HID.
+- Integrates with Home Assistant for real-time UPS monitoring.
+
+**Hardware:**
+- ESP32-S3 dev board (USB-OTG capable)
+- CyberPower UPS (tested: VP700ELCD)
+- RGB LED for status indication
+
+**Key Features Implemented:**
+- USB HID parsing for CyberPower UPS (17 data fields, 13 report types)
+- State management for UPS connection and data freshness
+- TCP server serving NUT protocol (port 3493), Home Assistant compatible
+- Real-time logging and robust error handling
+- LED status system: green (all good), yellow (partial issue), red (critical), white pulse (data activity)
+- Secure WiFi credential management (wifi_secrets.h, gitignored)
+- Clean git workflow (feature branches, merges, history cleaning)
+- README and codebase fully documented
+
+**Current Status:**
+- System is production-ready and running in a real environment
+- All features above are working and tested
+- LED status system is live and provides accurate feedback
+- Home Assistant integration is stable
+
+**Next Steps (for future sessions):**
+- Add a webserver for remote monitoring and configuration (including WiFi credentials)
+- Refine/calibrate UPS value parsing for even more accuracy
+- (Optional) Add more advanced features or UI improvements
+
+**Special Notes:**
+- Security incident with WiFi credentials was resolved and history cleaned
+- All code and documentation are up to date and in sync with GitHub
+
+---
+
+**Prompt to use for future sessions:**
+
+"I am working on an ESP32-S3 firmware project that acts as a NUT server for CyberPower UPS devices (via USB HID) and integrates with Home Assistant. The project already has:
+- Full USB HID parsing for CyberPower (17 fields, 13 reports)
+- TCP NUT server (port 3493), Home Assistant compatible
+- Robust WiFi management (with wifi_secrets.h)
+- A comprehensive LED status system (green/yellow/red/white pulse)
+- Secure credential handling and clean git history
+- All code and documentation up to date and in sync
+
+The system is running in production and works well. Next, I want to add a webserver for remote monitoring and configuration (including WiFi credentials), and possibly refine the UPS value parsing. Please pick up from here, and ask if you need any more details."
+
+---
+
+**Tip:**
+- Save this file somewhere safe. If you ever lose your chat, just copy-paste the prompt above into a new session to instantly resume with full context! 

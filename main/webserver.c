@@ -1,0 +1,325 @@
+#include "webserver.h"
+#include <string.h>
+#include "esp_log.h"
+#include "esp_http_server.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_system.h"
+
+static const char *TAG = "webserver";
+static httpd_handle_t server = NULL;
+
+// NVS namespace for WiFi credentials
+#define WIFI_NVS_NAMESPACE "wifi_config"
+#define WIFI_SSID_KEY "ssid"
+#define WIFI_PASS_KEY "password"
+
+// HTML content for the main page
+static const char* html_content = 
+    "<!DOCTYPE html>\n"
+    "<html lang=\"en\">\n"
+    "<head>\n"
+    "    <meta charset=\"UTF-8\">\n"
+    "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+    "    <title>ESP32 UPS Monitor & Configuration</title>\n"
+    "    <style>\n"
+    "        * { margin: 0; padding: 0; box-sizing: border-box; }\n"
+    "        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }\n"
+    "        .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 15px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); overflow: hidden; }\n"
+    "        .header { background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%); color: white; padding: 30px; text-align: center; }\n"
+    "        .header h1 { font-size: 2.5em; margin-bottom: 10px; }\n"
+    "        .content { padding: 30px; }\n"
+    "        .section { background: #f8f9fa; border-radius: 10px; padding: 25px; margin-bottom: 25px; border-left: 5px solid #3498db; }\n"
+    "        .section h2 { color: #2c3e50; margin-bottom: 20px; font-size: 1.5em; }\n"
+    "        .form-group { margin-bottom: 20px; }\n"
+    "        .form-group label { display: block; margin-bottom: 8px; font-weight: 600; color: #2c3e50; }\n"
+    "        .form-group input { width: 100%; padding: 12px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 16px; }\n"
+    "        .btn { padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; margin-right: 10px; }\n"
+    "        .btn-primary { background: #3498db; color: white; }\n"
+    "        .btn-secondary { background: #95a5a6; color: white; }\n"
+    "        .btn-danger { background: #e74c3c; color: white; }\n"
+    "        .status { padding: 15px; border-radius: 8px; margin-bottom: 20px; }\n"
+    "        .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }\n"
+    "        .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }\n"
+    "        .status-item { margin-bottom: 15px; padding: 10px; border-radius: 5px; background: #f8f9fa; }\n"
+    "        .status-label { font-weight: 600; color: #2c3e50; }\n"
+    "        .status-value { margin-left: 10px; color: #7f8c8d; }\n"
+    "        .status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }\n"
+    "        .status-indicator.green { background: #27ae60; }\n"
+    "        .status-indicator.yellow { background: #f39c12; }\n"
+    "        .status-indicator.red { background: #e74c3c; }\n"
+    "        .footer { background: #ecf0f1; padding: 20px 30px; text-align: center; color: #7f8c8d; }\n"
+    "    </style>\n"
+    "</head>\n"
+    "<body>\n"
+    "    <div class=\"container\">\n"
+    "        <div class=\"header\">\n"
+    "            <h1>ESP32 UPS Monitor & Configuration</h1>\n"
+    "            <p>System Status Dashboard and WiFi Configuration</p>\n"
+    "        </div>\n"
+    "        <div class=\"content\">\n"
+    "            <div class=\"section\">\n"
+    "                <h2>WiFi Configuration</h2>\n"
+    "                <div id=\"status\"></div>\n"
+    "                <form id=\"wifiForm\">\n"
+    "                    <div class=\"form-group\">\n"
+    "                        <label for=\"ssid\">WiFi SSID:</label>\n"
+    "                        <input type=\"text\" id=\"ssid\" name=\"ssid\" placeholder=\"Enter WiFi network name\" required>\n"
+    "                    </div>\n"
+    "                    <div class=\"form-group\">\n"
+    "                        <label for=\"password\">WiFi Password:</label>\n"
+    "                        <input type=\"password\" id=\"password\" name=\"password\" placeholder=\"Enter WiFi password\" required>\n"
+    "                    </div>\n"
+    "                    <button type=\"submit\" class=\"btn btn-primary\">Save & Reboot</button>\n"
+    "                    <button type=\"button\" class=\"btn btn-secondary\" onclick=\"rebootDevice()\">Reboot Only</button>\n"
+    "                </form>\n"
+    "            </div>\n"
+    "            \n"
+    "            <div class=\"section\">\n"
+    "                <h2>Reset to Factory Settings</h2>\n"
+    "                <p><strong>If you can't connect to WiFi and need to reset to factory settings:</strong></p>\n"
+    "                <ol style=\"margin-left: 20px; line-height: 1.6;\">\n"
+    "                    <li>While the ESP32 is running, hold down the <strong>BOOT button</strong></li>\n"
+    "                    <li>Keep holding for 5 seconds - you'll see the LED turn purple during the countdown</li>\n"
+    "                    <li>When the LED turns <strong>blue</strong>, you can release the button</li>\n"
+    "                    <li>Device will clear WiFi credentials and reboot automatically</li>\n"
+    "                    <li>Device will reboot and connect using factory WiFi settings</li>\n"
+    "                </ol>\n"
+    "                <p style=\"margin-top: 15px; padding: 10px; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 5px; color: #856404;\">\n"
+    "                    <strong>Note:</strong> This will clear any saved WiFi credentials and restore the original hardcoded settings from the firmware. The LED color changes provide visual feedback: Purple = counting down, Blue = safe to release.\n"
+    "                </p>\n"
+    "            </div>\n"
+    "        </div>\n"
+    "        <div class=\"footer\">\n"
+    "            <p>ESP32 UPS Server - System Status and Configuration Interface</p>\n"
+    "        </div>\n"
+    "    </div>\n"
+    "    <script>\n"
+    "        document.getElementById('wifiForm').addEventListener('submit', function(e) {\n"
+    "            e.preventDefault();\n"
+    "            const formData = new FormData(this);\n"
+    "            const data = {\n"
+    "                ssid: formData.get('ssid'),\n"
+    "                password: formData.get('password')\n"
+    "            };\n"
+    "            \n"
+    "            fetch('/config', {\n"
+    "                method: 'POST',\n"
+    "                headers: {\n"
+    "                    'Content-Type': 'application/json',\n"
+    "                },\n"
+    "                body: JSON.stringify(data)\n"
+    "            })\n"
+    "            .then(response => response.json())\n"
+    "            .then(data => {\n"
+    "                showStatus(data.success ? 'Configuration saved successfully! Device will reboot...' : 'Error: ' + data.message, data.success);\n"
+    "                if (data.success) {\n"
+    "                    setTimeout(() => {\n"
+    "                        window.location.reload();\n"
+    "                    }, 3000);\n"
+    "                }\n"
+    "            })\n"
+    "            .catch(error => {\n"
+    "                showStatus('Error: ' + error.message, false);\n"
+    "            });\n"
+    "        });\n"
+    "        \n"
+    "        function rebootDevice() {\n"
+    "            if (confirm('Are you sure you want to reboot the device?')) {\n"
+    "                fetch('/reboot', {\n"
+    "                    method: 'POST'\n"
+    "                })\n"
+    "                .then(response => response.json())\n"
+    "                .then(data => {\n"
+    "                    showStatus('Device rebooting...', true);\n"
+    "                    setTimeout(() => {\n"
+    "                        window.location.reload();\n"
+    "                    }, 5000);\n"
+    "                })\n"
+    "                .catch(error => {\n"
+    "                    showStatus('Error: ' + error.message, false);\n"
+    "                });\n"
+    "            }\n"
+    "        }\n"
+    "        \n"
+    "        function showStatus(message, isSuccess) {\n"
+    "            const statusDiv = document.getElementById('status');\n"
+    "            statusDiv.className = 'status ' + (isSuccess ? 'success' : 'error');\n"
+    "            statusDiv.textContent = message;\n"
+    "        }\n"
+    "    </script>\n"
+    "</body>\n"
+    "</html>";
+
+// WiFi configuration handlers
+static esp_err_t config_post_handler(httpd_req_t *req)
+{
+    char content[512];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    content[received] = '\0';
+    
+    // Parse JSON (simple parsing for ssid and password)
+    char ssid[64] = {0};
+    char password[64] = {0};
+    
+    // Simple JSON parsing - look for "ssid" and "password" fields
+    char *ssid_start = strstr(content, "\"ssid\":\"");
+    char *pass_start = strstr(content, "\"password\":\"");
+    
+    if (ssid_start) {
+        ssid_start += 8; // Skip "ssid":"
+        char *ssid_end = strchr(ssid_start, '"');
+        if (ssid_end) {
+            int len = ssid_end - ssid_start;
+            if (len < sizeof(ssid)) {
+                strncpy(ssid, ssid_start, len);
+                ssid[len] = '\0';
+            }
+        }
+    }
+    
+    if (pass_start) {
+        pass_start += 12; // Skip "password":"
+        char *pass_end = strchr(pass_start, '"');
+        if (pass_end) {
+            int len = pass_end - pass_start;
+            if (len < sizeof(password)) {
+                strncpy(password, pass_start, len);
+                password[len] = '\0';
+            }
+        }
+    }
+    
+    if (strlen(ssid) == 0 || strlen(password) == 0) {
+        const char* error_response = "{\"success\":false,\"message\":\"Missing SSID or password\"}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    
+    // Save to NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error opening NVS handle: %s", esp_err_to_name(err));
+        const char* error_response = "{\"success\":false,\"message\":\"Failed to open NVS\"}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    
+    err = nvs_set_str(nvs_handle, WIFI_SSID_KEY, ssid);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving SSID: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        const char* error_response = "{\"success\":false,\"message\":\"Failed to save SSID\"}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    
+    err = nvs_set_str(nvs_handle, WIFI_PASS_KEY, password);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving password: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        const char* error_response = "{\"success\":false,\"message\":\"Failed to save password\"}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    
+    err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error committing NVS: %s", esp_err_to_name(err));
+        const char* error_response = "{\"success\":false,\"message\":\"Failed to commit configuration\"}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    
+    ESP_LOGI(TAG, "WiFi configuration saved: SSID=%s", ssid);
+    
+    const char* success_response = "{\"success\":true,\"message\":\"Configuration saved successfully\"}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, success_response, HTTPD_RESP_USE_STRLEN);
+    
+    // Schedule reboot after a short delay
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    
+    return ESP_OK;
+}
+
+static esp_err_t reboot_post_handler(httpd_req_t *req)
+{
+    const char* response = "{\"success\":true,\"message\":\"Rebooting...\"}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    
+    // Schedule reboot after a short delay
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    
+    return ESP_OK;
+}
+
+static esp_err_t root_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html_content, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+
+
+esp_err_t webserver_start(void)
+{
+    if (server) {
+        ESP_LOGI(TAG, "Webserver already running");
+        return ESP_OK;
+    }
+    
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.uri_match_fn = httpd_uri_match_wildcard;
+    
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Register URI handlers
+        httpd_uri_t root = {
+            .uri = "/",
+            .method = HTTP_GET,
+            .handler = root_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &root);
+        
+        httpd_uri_t config_post = {
+            .uri = "/config",
+            .method = HTTP_POST,
+            .handler = config_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &config_post);
+        
+        httpd_uri_t reboot_post = {
+            .uri = "/reboot",
+            .method = HTTP_POST,
+            .handler = reboot_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &reboot_post);
+        
+
+        
+        ESP_LOGI(TAG, "Webserver started on port %d", config.server_port);
+        return ESP_OK;
+    } else {
+        ESP_LOGE(TAG, "Failed to start webserver");
+        return ESP_FAIL;
+    }
+} 
