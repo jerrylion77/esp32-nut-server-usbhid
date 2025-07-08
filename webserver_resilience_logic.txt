@@ -1,0 +1,39 @@
+Webserver Resilience Logic (Updated)
+====================================
+
+1. Periodic Heap Check
+----------------------
+- A dedicated FreeRTOS task runs every 10 seconds.
+- It checks the current free heap using esp_get_free_heap_size().
+- If free heap drops below a critical threshold (e.g., 16 KB), the ESP32 logs a warning and reboots using esp_restart().
+- This ensures the system recovers from memory leaks or fragmentation before a hard crash.
+
+2. Self-HTTP Health Check
+-------------------------
+- Another FreeRTOS task runs every 10 seconds.
+- The ESP32 makes an HTTP GET request to its own webserver (e.g., /api/wifi_status) using a new TCP connection each time (no keep-alive, no connection reuse).
+- The HTTP client sets a timeout (e.g., 2 seconds) for the request. If the server does not respond in time, the check is considered failed.
+- If 3 consecutive self-checks fail, the task restarts the webserver (not the whole ESP32).
+- After a successful check, the failure counter resets to zero.
+- This ensures the webserver is responsive and can recover from deadlocks or socket pool exhaustion.
+
+3. No Log Monitoring
+--------------------
+- All log hook, log queue, and log scanner logic is removed.
+- No resilience actions are triggered by log output.
+
+Rationale
+---------
+- Heap checks are fast and have negligible performance impact.
+- Self-HTTP checks use a new TCP connection each time, mimicking a new browser session, and do not use keep-alive.
+- The HTTP client timeout prevents the check from hanging and blocking the system.
+- This design is robust, simple, and avoids the complexity and risks of log-based monitoring.
+
+Summary Table
+=============
+| Condition                                      | Action                    |
+|------------------------------------------------|---------------------------|
+| >10 accept errors in 10s, free heap < 16kB     | Log and reboot ESP32      |
+| >10 accept errors in 10s, self-check fails     | Log and restart webserver |
+| >10 accept errors in 10s, self-check succeeds  | Reset counter/timer, no restart |
+| <10 errors in 10s, or window expires           | Reset counter/timer, no action  | 

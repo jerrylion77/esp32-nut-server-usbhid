@@ -47,6 +47,8 @@
 
 #include "webserver.h"
 
+#include "esp_http_client.h"
+
 // === WiFi NVS Management ===
 #define WIFI_NVS_NAMESPACE "wifi_config"
 #define WIFI_SSID_KEY "ssid"
@@ -127,6 +129,7 @@ static void ups_freshness_timer_task(void *pvParameters)
     const char *TAG = "ups-timer";
     ESP_LOGI(TAG, "UPS freshness timer task started");
     
+    TickType_t last_log = xTaskGetTickCount();
     while (1) {
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         uint32_t time_since_last_data = current_time - ups_last_data_time;
@@ -154,6 +157,12 @@ static void ups_freshness_timer_task(void *pvParameters)
         
         // Check every 2 seconds
         vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        // Periodically log stack high water mark
+        if (xTaskGetTickCount() - last_log > 30000 / portTICK_PERIOD_MS) {
+            last_log = xTaskGetTickCount();
+            ESP_LOGI("ups_timer", "Stack high water mark: %u bytes", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+        }
     }
 }
 
@@ -485,6 +494,7 @@ void tcp_server_task(void *pvParameters)
     ESP_LOGI(TAG, "Socket listening");
     free(address_info);
 
+    TickType_t last_log = xTaskGetTickCount();
     while (1) {
         struct sockaddr_storage source_addr;
         socklen_t addr_len = sizeof(source_addr);
@@ -671,6 +681,12 @@ void tcp_server_task(void *pvParameters)
             }
         }
         vTaskDelay(pdMS_TO_TICKS(YIELD_TO_ALL_MS));
+        
+        // Periodically log stack high water mark
+        if (xTaskGetTickCount() - last_log > 30000 / portTICK_PERIOD_MS) {
+            last_log = xTaskGetTickCount();
+            ESP_LOGI("tcp_server", "Stack high water mark: %u bytes", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+        }
     }
     // Cleanup (should not reach here)
     if (listen_sock != INVALID_SOCK) {
@@ -1594,6 +1610,135 @@ void connect_to_wifi(void)
     update_led_with_pulse();
 }
 
+// Forward declaration for resilience logic
+void handle_accept_error(void);
+void webserver_restart(void);
+
+// ===================== LOG MONITOR MODULARIZATION =====================
+// To enable the log monitor logic, set ENABLE_LOG_MONITOR to 1 below.
+// To disable all log monitor logic (as if it never existed), set to 0.
+// ======================================================================
+#define ENABLE_LOG_MONITOR 0
+// ======================================================================
+#if ENABLE_LOG_MONITOR
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#define LOG_SCAN_TASK_STACK 4096
+#define LOG_SCAN_TASK_PRIO 2
+#define LOG_SCAN_QUEUE_LEN 32
+#define LOG_SCAN_LINE_MAX 256
+
+static QueueHandle_t log_scan_queue = NULL;
+static int (*orig_vprintf)(const char *, va_list) = NULL;
+
+// Log hook: enqueue log lines for processing in a safe context
+static int log_intercept_vprintf(const char *fmt, va_list args) {
+    char buf[LOG_SCAN_LINE_MAX];
+    int len = vsnprintf(buf, sizeof(buf), fmt, args);
+    if (len > 0 && log_scan_queue) {
+        buf[LOG_SCAN_LINE_MAX-1] = '\0';
+        char *heap_line = malloc(strlen(buf) + 1);
+        if (heap_line) {
+            strcpy(heap_line, buf);
+            if (xQueueSend(log_scan_queue, &heap_line, 0) != pdTRUE) {
+                free(heap_line); // Drop if queue full
+            }
+        }
+    }
+    // Call the original vprintf, not vprintf directly, to avoid recursion
+    if (orig_vprintf) {
+        return orig_vprintf(fmt, args);
+    }
+    return 0;
+}
+
+// Log scanner task: dequeue and process log lines (no logging, no recursion)
+static void log_scanner_task(void *arg) {
+    char *line = NULL;
+    TickType_t last_log = xTaskGetTickCount();
+    while (1) {
+        if (xQueueReceive(log_scan_queue, &line, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+            // Only process the line (e.g., scan for error strings, trigger logic)
+            free(line);
+        }
+        // Periodically log stack high water mark
+        if (xTaskGetTickCount() - last_log > 30000 / portTICK_PERIOD_MS) {
+            last_log = xTaskGetTickCount();
+            ESP_LOGI("logscan", "Stack high water mark: %u bytes", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+        }
+    }
+}
+#endif // ENABLE_LOG_MONITOR
+
+#define HEAP_CRITICAL_THRESHOLD (16 * 1024) // 16 KB
+#define SELF_HTTP_CHECK_INTERVAL_MS 10000
+#define SELF_HTTP_CHECK_FAIL_LIMIT 3
+#define SELF_HTTP_CHECK_TIMEOUT_MS 2000
+
+// --- Periodic Heap Check Task ---
+static void heap_check_task(void *pvParameters) {
+    const char *TAG = "heap-check";
+    while (1) {
+        size_t free_heap = esp_get_free_heap_size();
+        ESP_LOGI(TAG, "Heap check: %u bytes free", (unsigned)free_heap);
+        if (free_heap < HEAP_CRITICAL_THRESHOLD) {
+            ESP_LOGE(TAG, "Free heap critically low (%u bytes), rebooting!", (unsigned)free_heap);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Check every 10s
+    }
+}
+
+// --- Self-HTTP Health Check Task ---
+static void self_http_check_task(void *pvParameters) {
+    const char *TAG = "self-http-check";
+    int fail_count = 0;
+    int check_count = 0;
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1/api/wifi_status");
+    while (1) {
+        check_count++;
+        esp_http_client_config_t config = {
+            .url = url,
+            .timeout_ms = SELF_HTTP_CHECK_TIMEOUT_MS,
+            .disable_auto_redirect = true,
+            .method = HTTP_METHOD_GET,
+            .buffer_size = 256,
+            .buffer_size_tx = 256,
+            .is_async = false,
+            .keep_alive_enable = false,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (client) {
+            esp_http_client_set_header(client, "Connection", "close");
+            esp_err_t err = esp_http_client_perform(client);
+            int status = esp_http_client_get_status_code(client);
+            if (err == ESP_OK && status == 200) {
+                ESP_LOGI(TAG, "Self-HTTP check #%d: SUCCESS (status=%d)", check_count, status);
+                fail_count = 0;
+            } else {
+                fail_count++;
+                ESP_LOGW(TAG, "Self-HTTP check #%d: FAIL (status=%d, err=%s, fail_count=%d/%d)", check_count, status, esp_err_to_name(err), fail_count, SELF_HTTP_CHECK_FAIL_LIMIT);
+                if (fail_count >= SELF_HTTP_CHECK_FAIL_LIMIT) {
+                    ESP_LOGE(TAG, "3 consecutive failures, restarting webserver");
+                    webserver_restart();
+                    fail_count = 0;
+                }
+            }
+            esp_http_client_cleanup(client);
+        } else {
+            ESP_LOGE(TAG, "Self-HTTP check #%d: Failed to init HTTP client", check_count);
+            fail_count++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(SELF_HTTP_CHECK_INTERVAL_MS));
+    }
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -1678,6 +1823,11 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start webserver: %s", esp_err_to_name(ret));
     }
+    
+    // Start heap check task
+    xTaskCreate(heap_check_task, "heap_check", 2048, NULL, 2, NULL);
+    // Start self-HTTP health check task
+    xTaskCreate(self_http_check_task, "self_http_check", 3072, NULL, 2, NULL);
 }
 
 //static const char *TAG = "wifi";
@@ -1871,6 +2021,12 @@ ups_connection_state_t get_ups_state(void) {
 // Getter for last UPS data time
 unsigned int get_ups_last_data_time(void) {
     return ups_last_data_time;
+}
+
+// Add a stub for webserver_restart if not present
+void __attribute__((weak)) webserver_restart(void) {
+    ESP_LOGW("webserver", "Restarting webserver due to health check failure");
+    // ... existing restart logic ...
 }
 
 

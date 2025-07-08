@@ -8,6 +8,9 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "lwip/ip4_addr.h"
+#include <inttypes.h>
+#include "esp_http_client.h"
+#include "esp_timer.h"
 
 // Add UPS state enum definition for use in this file
 typedef enum {
@@ -24,6 +27,26 @@ static httpd_handle_t server = NULL;
 #define WIFI_NVS_NAMESPACE "wifi_config"
 #define WIFI_SSID_KEY "ssid"
 #define WIFI_PASS_KEY "password"
+
+// Helper for unique request IDs
+static volatile uint32_t webserver_req_counter = 0;
+
+// --- Webserver resilience logic state ---
+#define ACCEPT_ERROR_THRESHOLD 10
+#define ACCEPT_ERROR_WINDOW_MS 10000
+#define FREE_HEAP_CRITICAL (16 * 1024)
+#define SELF_CHECK_URL "http://127.0.0.1/api/wifi_status"
+#define FREE_HEAP_LOG_INTERVAL_MS 20000
+
+static int accept_error_counter = 0;
+static int64_t accept_error_first_ts = 0;
+static esp_timer_handle_t free_heap_log_timer = NULL;
+
+// Forward declarations
+static void log_free_heap(void* arg);
+static void reset_accept_error_state(void);
+void handle_accept_error(void);
+static bool perform_self_check(void);
 
 // HTML content for the main page
 static const char* html_content = 
@@ -196,13 +219,97 @@ static const char* html_content =
     "</body>\n"
     "</html>";
 
+// --- Periodic free heap logging ---
+static void log_free_heap(void* arg) {
+    ESP_LOGI(TAG, "Free heap: %u bytes, Min free heap: %u bytes", (unsigned int)esp_get_free_heap_size(), (unsigned int)esp_get_minimum_free_heap_size());
+}
+
+static void start_free_heap_logging(void) {
+    if (!free_heap_log_timer) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = &log_free_heap,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "heaplog"
+        };
+        esp_timer_create(&timer_args, &free_heap_log_timer);
+        esp_timer_start_periodic(free_heap_log_timer, FREE_HEAP_LOG_INTERVAL_MS * 1000);
+    }
+}
+
+static void reset_accept_error_state(void) {
+    accept_error_counter = 0;
+    accept_error_first_ts = 0;
+}
+
+// --- Accept error burst detection ---
+void handle_accept_error(void) {
+    int64_t now = esp_timer_get_time() / 1000; // ms
+    if (accept_error_counter == 0) {
+        accept_error_first_ts = now;
+        accept_error_counter = 1;
+        return;
+    }
+    accept_error_counter++;
+    if ((now - accept_error_first_ts) < ACCEPT_ERROR_WINDOW_MS) {
+        if (accept_error_counter > ACCEPT_ERROR_THRESHOLD) {
+            // Burst detected, proceed to memory check and self-check
+            if (esp_get_free_heap_size() < FREE_HEAP_CRITICAL) {
+                ESP_LOGE(TAG, "[RESILIENCE] Heap critically low (%u bytes), rebooting system", (unsigned int)esp_get_free_heap_size());
+                esp_restart();
+                return;
+            }
+            ESP_LOGW(TAG, "[RESILIENCE] Accept error burst detected, performing self-check");
+            if (!perform_self_check()) {
+                ESP_LOGE(TAG, "[RESILIENCE] Self-check failed, restarting webserver");
+                if (server) {
+                    httpd_stop(server);
+                    server = NULL;
+                }
+                webserver_start();
+            } else {
+                ESP_LOGI(TAG, "[RESILIENCE] Self-check succeeded, not restarting webserver");
+            }
+            reset_accept_error_state();
+        }
+    } else {
+        // Window expired, reset state
+        reset_accept_error_state();
+    }
+}
+
+// --- Self-check: always use new TCP connection ---
+static bool perform_self_check(void) {
+    esp_http_client_config_t config = {
+        .url = SELF_CHECK_URL,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = 2000,
+        .disable_auto_redirect = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Connection", "close");
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err == ESP_OK && status == 200) {
+        return true;
+    }
+    ESP_LOGW(TAG, "[RESILIENCE] Self-check HTTP error: %s, status: %d", esp_err_to_name(err), status);
+    return false;
+}
+
 // WiFi configuration handler
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] config_post_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
     char content[512];
     int received = httpd_req_recv(req, content, sizeof(content) - 1);
     if (received <= 0) {
+        ESP_LOGW(TAG, "[REQ %lu] config_post_handler FAILED to receive data", (unsigned long)req_id);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to receive data");
+        ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (error)", (unsigned long)req_id);
         return ESP_FAIL;
     }
     content[received] = '\0';
@@ -240,9 +347,11 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     }
     
     if (strlen(ssid) == 0 || strlen(password) == 0) {
+        ESP_LOGW(TAG, "[REQ %lu] config_post_handler MISSING SSID or password", (unsigned long)req_id);
         const char* error_response = "{\"success\":false,\"message\":\"Missing SSID or password\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (missing data)", (unsigned long)req_id);
         return ESP_OK;
     }
     
@@ -250,30 +359,33 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error opening NVS handle: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "[REQ %lu] config_post_handler Error opening NVS handle: %s", (unsigned long)req_id, esp_err_to_name(err));
         const char* error_response = "{\"success\":false,\"message\":\"Failed to open NVS\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (NVS error)", (unsigned long)req_id);
         return ESP_OK;
     }
     
     err = nvs_set_str(nvs_handle, WIFI_SSID_KEY, ssid);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error saving SSID: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "[REQ %lu] config_post_handler Error saving SSID: %s", (unsigned long)req_id, esp_err_to_name(err));
         nvs_close(nvs_handle);
         const char* error_response = "{\"success\":false,\"message\":\"Failed to save SSID\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (NVS error)", (unsigned long)req_id);
         return ESP_OK;
     }
     
     err = nvs_set_str(nvs_handle, WIFI_PASS_KEY, password);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error saving password: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "[REQ %lu] config_post_handler Error saving password: %s", (unsigned long)req_id, esp_err_to_name(err));
         nvs_close(nvs_handle);
         const char* error_response = "{\"success\":false,\"message\":\"Failed to save password\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (NVS error)", (unsigned long)req_id);
         return ESP_OK;
     }
     
@@ -281,15 +393,15 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     nvs_close(nvs_handle);
     
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error committing NVS: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "[REQ %lu] config_post_handler Error committing NVS: %s", (unsigned long)req_id, esp_err_to_name(err));
         const char* error_response = "{\"success\":false,\"message\":\"Failed to commit configuration\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, error_response, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (NVS error)", (unsigned long)req_id);
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "WiFi configuration saved: SSID=%s", ssid);
-    
+    ESP_LOGI(TAG, "[REQ %lu] config_post_handler END (success)", (unsigned long)req_id);
     const char* success_response = "{\"success\":true,\"message\":\"Configuration saved successfully\"}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, success_response, HTTPD_RESP_USE_STRLEN);
@@ -304,6 +416,9 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 // Reboot handler
 static esp_err_t reboot_post_handler(httpd_req_t *req)
 {
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] reboot_post_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
     const char* response = "{\"success\":true,\"message\":\"Rebooting...\"}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -312,20 +427,28 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     
+    ESP_LOGI(TAG, "[REQ %lu] reboot_post_handler END", (unsigned long)req_id);
     return ESP_OK;
 }
 
 // Root page handler
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] root_get_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html_content, HTTPD_RESP_USE_STRLEN);
+    ESP_LOGI(TAG, "[REQ %lu] root_get_handler END", (unsigned long)req_id);
     return ESP_OK;
 }
 
 // WiFi status handler
 static esp_err_t wifi_status_get_handler(httpd_req_t *req)
 {
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] wifi_status_get_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
     wifi_ap_record_t ap_info;
     esp_netif_ip_info_t ip_info;
     char response[512];
@@ -357,12 +480,16 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    ESP_LOGI(TAG, "[REQ %lu] wifi_status_get_handler END", (unsigned long)req_id);
     return ESP_OK;
 }
 
 // UPS status handler
 static esp_err_t ups_status_get_handler(httpd_req_t *req)
 {
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] ups_status_get_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
     extern ups_connection_state_t get_ups_state(void);
     extern unsigned int get_ups_last_data_time(void);
     char response[128];
@@ -381,6 +508,7 @@ static esp_err_t ups_status_get_handler(httpd_req_t *req)
         state_str, color, (unsigned long)ms_since_last);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    ESP_LOGI(TAG, "[REQ %lu] ups_status_get_handler END", (unsigned long)req_id);
     return ESP_OK;
 }
 
@@ -391,6 +519,7 @@ esp_err_t webserver_start(void)
         ESP_LOGI(TAG, "Webserver already running");
         return ESP_OK;
     }
+    start_free_heap_logging();
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
