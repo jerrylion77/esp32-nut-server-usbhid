@@ -8,3 +8,9 @@ managed_components/*
 dependencies.lock
 # WiFi credentials (never commit)
 main/wifi_secrets.h
+# User-specific/temporary files to ignore
+main/webserver.c.systemdash-backup
+monitor_output.txt
+overnight.log
+project_structure.txt
+webserver_monitor.log
