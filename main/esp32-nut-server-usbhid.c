@@ -433,6 +433,20 @@ static inline char* get_clients_address(struct sockaddr_storage *source_addr)
     return address_str;
 }
 
+// --- TCP Server Status Tracking ---
+#include "freertos/task.h"
+
+static TaskHandle_t tcp_server_task_handle = NULL;
+static int active_connections_count = 0;
+
+int get_active_tcp_connections(void) {
+    return active_connections_count;
+}
+
+bool is_tcp_server_running(void) {
+    return (tcp_server_task_handle != NULL && eTaskGetState(tcp_server_task_handle) != eDeleted);
+}
+
 // TCP Server Task
 void tcp_server_task(void *pvParameters)
 {
@@ -510,6 +524,11 @@ void tcp_server_task(void *pvParameters)
                 ESP_LOGI(TAG, "[sock=%d]: Connection accepted from IP:%s", sock[new_sock_index], get_clients_address(&source_addr));
                 int flags = fcntl(sock[new_sock_index], F_GETFL);
                 fcntl(sock[new_sock_index], F_SETFL, flags | O_NONBLOCK);
+                // Update active connection count
+                active_connections_count = 0;
+                for (int j = 0; j < max_socks; ++j) {
+                    if (sock[j] != INVALID_SOCK) active_connections_count++;
+                }
             }
         }
         for (int i = 0; i < max_socks; ++i) {
@@ -519,6 +538,11 @@ void tcp_server_task(void *pvParameters)
                     ESP_LOGI(TAG, "[sock=%d]: try_receive() returned %d -> closing the socket", sock[i], len);
                     close(sock[i]);
                     sock[i] = INVALID_SOCK;
+                    // Update active connection count
+                    active_connections_count = 0;
+                    for (int j = 0; j < max_socks; ++j) {
+                        if (sock[j] != INVALID_SOCK) active_connections_count++;
+                    }
                 } else if (len > 0) {
                     // NUT protocol command parsing
                     rx_buffer[len] = '\0'; // Null-terminate for string ops
@@ -698,6 +722,7 @@ void tcp_server_task(void *pvParameters)
         }
     }
     vTaskDelete(NULL);
+    tcp_server_task_handle = NULL;
 }
 
 // =tcp server
@@ -1811,7 +1836,7 @@ void app_main(void)
     task_created = xTaskCreate(&timer_task, "timer_task", 4 * 1024, NULL, 8, NULL);
     assert(task_created == pdTRUE);
     // Start TCP server for NUT protocol
-    task_created = xTaskCreate(&tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
+    task_created = xTaskCreate(&tcp_server_task, "tcp_server", 4096, NULL, 5, &tcp_server_task_handle);
     assert(task_created == pdTRUE);
     
     // Start UPS freshness timer task

@@ -68,11 +68,35 @@ Implementation Details:
 - Use existing webserver refresh mechanism for real-time updates
 - No new processes required - piggyback on existing dashboard refresh
 
+4. ESP HEALTH
+-------------
+Design Specification:
+- Free Memory: "XXXKB out of XXXKB (XX% Free)"
+- Uptime: "X hours X minutes X seconds" (same format as UPS status but without "ago")
+
+Color Logic:
+- 🟢 GREEN: Memory > 70% free, system healthy
+- 🟡 AMBER: Memory 30-70% free, moderate usage
+- 🔴 RED: Memory < 30% free, low memory warning
+
+Data Source:
+- esp_get_free_heap_size() for current free heap
+- esp_get_minimum_free_heap_size() for minimum free heap
+- esp_timer_get_time() for system uptime
+- Total heap size calculation (ESP32-S3 known memory layout)
+
+Implementation Details:
+- New API endpoint: /api/esp_health
+- Reuse existing formatTimeAgo() function (without "ago" suffix)
+- Memory percentage calculation: (free_heap / total_heap) * 100
+- Uptime calculation: esp_timer_get_time() / 1000000 (convert to seconds)
+- Integrate with existing dashboard refresh mechanism
+
 TECHNICAL ARCHITECTURE
 ---------------------
 Dashboard Refresh Mechanism:
 - JavaScript-based polling every 5 seconds (setInterval with 5000ms)
-- AJAX calls to /api/wifi_status and /api/ups_status endpoints
+- AJAX calls to /api/wifi_status, /api/ups_status, /api/tcp_status, and /api/esp_health endpoints
 - JSON response with individual status components
 - Real-time color updates without page refresh
 

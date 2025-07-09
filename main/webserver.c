@@ -78,6 +78,7 @@ static const char* html_content =
     "        .status-indicator { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 8px; vertical-align: middle; background: #bbb; }\n"
     "        .status-indicator.green { background: #27ae60; }\n"
     "        .status-indicator.red { background: #e74c3c; }\n"
+    "        .status-indicator.yellow { background: #f1c40f; }\n"
     "        .signal-bar { display: inline-block; width: 8px; height: 18px; margin-right: 2px; background: #dfe6e9; border-radius: 2px 2px 0 0; vertical-align: bottom; opacity: 0.5; transition: background 0.2s, opacity 0.2s; }\n"
     "        .signal-bar.active { background: #3498db; opacity: 1; }\n"
         "        .signal-inline { display: flex; align-items: center; font-size: 1.1em; color: #495057; gap: 8px; }\n"
@@ -144,6 +145,12 @@ static const char* html_content =
     "                    <span id=\"ups-status\" class=\"status-value\"></span>\n"
     "                </div>\n"
     "                <div id=\"ups-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\"></div>\n"
+    "                <div class=\"status-row\">\n"
+    "                    <span id=\"tcp-indicator\" class=\"status-indicator\"></span>\n"
+    "                    <span class=\"status-label\">TCP Status:</span>\n"
+    "                    <span id=\"tcp-status\" class=\"status-value\"></span>\n"
+    "                </div>\n"
+    "                <div id=\"tcp-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\"></div>\n"
     "            </div>\n"
     "        </div>\n"
     "        <div class=\"footer\">\n"
@@ -283,11 +290,35 @@ static const char* html_content =
     "            document.getElementById(\"ups-details\").textContent = 'Last message: ' + timeAgo;\n"
     "        });\n"
     "    }\n"
+    "    function updateTcpStatus() {\n"
+    "        fetch('/api/tcp_status').then(r => r.json()).then(data => {\n"
+    "            var ind = document.getElementById(\"tcp-indicator\");\n"
+    "            var statusText = '';\n"
+    "            var color = 'red';\n"
+    "            if (data.running) {\n"
+    "                if (data.connections > 0) {\n"
+    "                    color = 'green';\n"
+    "                    statusText = 'Running (' + data.connections + ' connection' + (data.connections > 1 ? 's' : '') + ')';\n"
+    "                } else {\n"
+    "                    color = 'yellow';\n"
+    "                    statusText = 'Running (0 connections)';\n"
+    "                }\n"
+    "            } else {\n"
+    "                color = 'red';\n"
+    "                statusText = 'Stopped (0 connections)';\n"
+    "            }\n"
+    "            ind.className = 'status-indicator ' + color;\n"
+    "            document.getElementById(\"tcp-status\").textContent = statusText;\n"
+    "            document.getElementById(\"tcp-details\").textContent = '';\n"
+    "        });\n"
+    "    }\n"
     "    initializeSignalBars();\n"
     "    updateWifiStatus();\n"
     "    updateUpsStatus();\n"
+    "    updateTcpStatus();\n"
     "    setInterval(updateWifiStatus, 5000);\n"
     "    setInterval(updateUpsStatus, 5000);\n"
+    "    setInterval(updateTcpStatus, 5000);\n"
     "    </script>\n"
     "</body>\n"
     "</html>";
@@ -369,6 +400,27 @@ static bool perform_self_check(void) {
     }
     ESP_LOGW(TAG, "[RESILIENCE] Self-check HTTP error: %s, status: %d", esp_err_to_name(err), status);
     return false;
+}
+
+// --- TCP Status API Handler ---
+extern int get_active_tcp_connections(void);
+extern bool is_tcp_server_running(void);
+
+static esp_err_t tcp_status_get_handler(httpd_req_t *req)
+{
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] tcp_status_get_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
+    char response[128];
+    bool running = is_tcp_server_running();
+    int connections = get_active_tcp_connections();
+    snprintf(response, sizeof(response),
+        "{\"running\":%s,\"connections\":%d}",
+        running ? "true" : "false", connections);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    ESP_LOGI(TAG, "[REQ %lu] tcp_status_get_handler END", (unsigned long)req_id);
+    return ESP_OK;
 }
 
 // WiFi configuration handler
@@ -638,6 +690,14 @@ esp_err_t webserver_start(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &ups_status);
+
+        httpd_uri_t tcp_status = {
+            .uri = "/api/tcp_status",
+            .method = HTTP_GET,
+            .handler = tcp_status_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &tcp_status);
         
         ESP_LOGI(TAG, "Webserver started on port %d", config.server_port);
         return ESP_OK;
