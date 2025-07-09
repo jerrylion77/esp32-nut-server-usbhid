@@ -41,10 +41,8 @@ The firmware includes a comprehensive web dashboard accessible at `http://<ESP32
 - **Auto-refresh** every 5 seconds
 
 #### **2. UPS Status** 🔋
-- **Real-time UPS monitoring** with battery level, load, runtime
-- **Input/Output voltage** and temperature display
 - **Status indicators** with RAG color coding (green/amber/red)
-- **Last data timestamp** with "ago" formatting
+- **Last data timestamp**
 - **Auto-refresh** every 5 seconds
 
 #### **3. TCP Status (NUT Server)** 🌐
