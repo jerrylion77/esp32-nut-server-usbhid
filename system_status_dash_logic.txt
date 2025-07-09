@@ -1,0 +1,94 @@
+SYSTEM STATUS DASHBOARD LOGIC
+================================
+
+OVERVIEW
+--------
+The System Status Dashboard displays real-time status of three critical system components:
+1. WiFi Status
+2. UPS Status  
+3. TCP Status (NUT Server)
+
+Each component uses RAG (Red-Amber-Green) color coding for quick visual status assessment.
+
+1. WIFI STATUS
+--------------
+Current Implementation:
+- Status: Connected/Disconnected
+- IP Address: Current assigned IP
+- Signal Strength: RSSI value
+- SSID: Connected network name
+
+Color Logic:
+- 🟢 GREEN: Connected (any signal strength when connected)
+- 🟡 AMBER: Not implemented in current code
+- 🔴 RED: Disconnected
+
+Data Source:
+- esp_wifi_sta_get_ap_info() for connection status
+- esp_netif_get_ip_info() for IP address
+- WiFi event handlers for real-time updates
+
+2. UPS STATUS
+-------------
+Current Implementation:
+- Status: CONNECTED/DISCONNECTED
+- Last Message: Time since last UPS data received
+- Human-readable time format (e.g., "2 minutes 15 seconds ago")
+
+Color Logic:
+- 🟢 GREEN: UPS_CONNECTED_ACTIVE (state 2)
+- 🟡 AMBER: UPS_CONNECTED_WAITING_DATA (state 1) 
+- 🔴 RED: UPS_DISCONNECTED (state 0) or UPS_CONNECTED_STALE (state 3)
+
+Data Source:
+- ups_state enum (UPS_DISCONNECTED, UPS_CONNECTED_WAITING_DATA, etc.)
+- get_ups_last_data_time() for timestamp
+- USB HID device connection status
+
+3. TCP STATUS (NUT SERVER)
+--------------------------
+Design Specification:
+- Status: Running/Stopped
+- Connection Count: Number of active NUT client connections
+- Display Format: "Running (2 connections)" or "Stopped (0 connections)"
+
+Color Logic:
+- 🟢 GREEN: TCP server running, connections active (healthy)
+- 🟡 AMBER: TCP server running, no connections (idle/waiting)
+- 🔴 RED: TCP server not running (error/stopped)
+
+Data Source:
+- tcp_server_task status (FreeRTOS task state)
+- sock[4] array connection count (count non-INVALID_SOCK entries)
+- Task handle for status monitoring
+
+Implementation Details:
+- Global variables: tcp_server_task_handle, active_connections_count
+- Update connection count in socket accept/close logic
+- Use existing webserver refresh mechanism for real-time updates
+- No new processes required - piggyback on existing dashboard refresh
+
+TECHNICAL ARCHITECTURE
+---------------------
+Dashboard Refresh Mechanism:
+- JavaScript-based polling every 5 seconds (setInterval with 5000ms)
+- AJAX calls to /api/wifi_status and /api/ups_status endpoints
+- JSON response with individual status components
+- Real-time color updates without page refresh
+
+Data Flow:
+1. System components update their status variables
+2. Webserver /api/wifi_status and /api/ups_status endpoints provide individual status data
+3. JavaScript receives JSON and updates dashboard colors/text
+4. RAG color coding provides instant visual feedback
+
+Error Handling:
+- Graceful degradation if any component fails
+- Timeout handling for stale data
+- Fallback to RED status for unknown states
+
+Future Enhancements:
+- System uptime display
+- Memory usage status
+- Temperature monitoring
+- Network throughput metrics 

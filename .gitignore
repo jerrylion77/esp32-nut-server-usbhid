@@ -12,5 +12,10 @@ main/wifi_secrets.h
 main/webserver.c.systemdash-backup
 monitor_output.txt
 overnight.log
+overnight2.log
+overnight3.log
 project_structure.txt
 webserver_monitor.log
+wifi_signal_test_v3.html
+wifi_signal_test_v2.html
+wifi_signal_test.html

@@ -1763,7 +1763,7 @@ void app_main(void)
     connect_to_wifi();
     
     // Start button monitoring task
-    xTaskCreate(button_monitor_task, "button_monitor", 2048, NULL, 5, NULL);
+    xTaskCreate(button_monitor_task, "button_monitor", 3072, NULL, 5, NULL);
     //SemaphoreHandle_t server_ready = xSemaphoreCreateBinary();
     //assert(server_ready);
     //xTaskCreate(tcp_server_task, "tcp_server", 4096, &server_ready, 5, NULL);
@@ -1815,7 +1815,7 @@ void app_main(void)
     assert(task_created == pdTRUE);
     
     // Start UPS freshness timer task
-    task_created = xTaskCreate(ups_freshness_timer_task, "ups_timer", 2048, NULL, 3, NULL);
+    task_created = xTaskCreate(ups_freshness_timer_task, "ups_timer", 3072, NULL, 3, NULL);
     assert(task_created == pdTRUE);
     
     // Start webserver
@@ -1825,7 +1825,7 @@ void app_main(void)
     }
     
     // Start heap check task
-    xTaskCreate(heap_check_task, "heap_check", 2048, NULL, 2, NULL);
+    xTaskCreate(heap_check_task, "heap_check", 4096, NULL, 2, NULL);
     // Start self-HTTP health check task
     xTaskCreate(self_http_check_task, "self_http_check", 3072, NULL, 2, NULL);
 }
