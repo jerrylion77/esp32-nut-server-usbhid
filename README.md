@@ -13,7 +13,7 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 3. **Implements CyberPower HID protocol** based on reverse engineering ✅
 4. **Provides stable NUT server** for Home Assistant integration ✅
 5. **Includes modular LED status system** for visual feedback ✅
-6. **Webserver: in progress (WiFi settings, factory restore, WiFi status, and UPS status are complete; TCP status, system health, and overall device status are next)**
+6. **Features comprehensive web dashboard** for real-time monitoring and configuration ✅
 7. **Maintains clean, maintainable code** with proper error handling ✅
 
 ## 🔧 **Key Improvements Over Original**
@@ -21,10 +21,59 @@ This fork focuses on creating a **reliable, efficient, and CyberPower-optimized*
 - **CyberPower-specific HID parsing** using reverse engineering and protocol analysis ✅
 - **Complete NUT protocol implementation** with authentication support ✅
 - **18 UPS variables** extracted and served via NUT (12 dynamic + 6 static) ✅
+- **Professional web dashboard** with real-time monitoring and RAG status indicators ✅
+- **RESTful API endpoints** for system status and configuration ✅
 - **Proper error handling** and fail-safe device detection ✅
 - **Home Assistant compatibility** with automatic discovery ✅
 - **Reliable WiFi reconnection** handling ✅
 - **Clean, maintainable codebase** with systematic refactoring ✅
+
+## 🌐 **Web Dashboard System ✅**
+
+The firmware includes a comprehensive web dashboard accessible at `http://<ESP32_IP>` that provides real-time monitoring of all system components:
+
+### **Dashboard Sections:**
+
+#### **1. WiFi Status** 📶
+- **Dynamic signal strength bars** with real-time updates
+- **Signal percentage** display
+- **Connection status** with RAG color coding
+- **Auto-refresh** every 5 seconds
+
+#### **2. UPS Status** 🔋
+- **Real-time UPS monitoring** with battery level, load, runtime
+- **Input/Output voltage** and temperature display
+- **Status indicators** with RAG color coding (green/amber/red)
+- **Last data timestamp** with "ago" formatting
+- **Auto-refresh** every 5 seconds
+
+#### **3. TCP Status (NUT Server)** 🌐
+- **Server running status** (running/stopped)
+- **Active connection count** with RAG color coding
+- **Real-time monitoring** of NUT server health
+- **Auto-refresh** every 5 seconds
+
+#### **4. ESP Health** 💻
+- **Free memory monitoring** with percentage calculation
+- **System uptime** display (formatted without "ago")
+- **Memory usage** with RAG color coding:
+  - **Green**: ≥65% free memory
+  - **Amber**: 30-64% free memory
+  - **Red**: <30% free memory
+- **Auto-refresh** every 5 seconds
+
+### **API Endpoints:**
+- `GET /api/wifi_status` - WiFi connection status and signal strength
+- `GET /api/ups_status` - UPS data and status information
+- `GET /api/tcp_status` - NUT server status and connection count
+- `GET /api/esp_health` - ESP32 system health (memory, uptime)
+
+### **Features:**
+- **Responsive design** that works on desktop and mobile
+- **Real-time updates** with automatic polling
+- **RAG (Red/Amber/Green) color coding** for quick status assessment
+- **Clean, professional interface** with consistent styling
+- **No external dependencies** - pure HTML/CSS/JavaScript
 
 ## 📊 **Supported UPS Variables**
 
@@ -93,7 +142,11 @@ The LED automatically updates based on WiFi connection status and UPS data fresh
 
 ```
 ┌─────────────────────────────────────┐
-│ 7. Webserver: In progress            │
+│ 7. Web Dashboard System ✅          │
+│    - WiFi Status Monitoring         │
+│    - UPS Status Dashboard           │
+│    - TCP Status (NUT Server)        │
+│    - ESP Health Monitoring          │
 ├─────────────────────────────────────┤
 │ 6. LED Status System ✅             │
 ├─────────────────────────────────────┤
@@ -118,7 +171,8 @@ The LED automatically updates based on WiFi connection status and UPS data fresh
 
 ### Software
 - ESP-IDF v5.1 or later
-- Home Assistant with NUT integration
+- Home Assistant with NUT integration (optional)
+- Modern web browser for dashboard access
 
 ## 🚀 **Development Status**
 
@@ -129,8 +183,8 @@ The LED automatically updates based on WiFi connection status and UPS data fresh
 - [x] NUT server implementation
 - [x] Home Assistant integration
 - [x] LED status system
+- [x] Web dashboard system (complete)
 - [x] Production optimization
-- [ ] Webserver for configuration and monitoring
 
 ## 🔧 **Setup Instructions**
 
@@ -154,7 +208,13 @@ The ESP32 will attempt to connect to WiFi. Monitor the output to see connection 
    ```
 3. **Do not commit this file to git!** It is already listed in `.gitignore` for your safety.
 
-### **3. Home Assistant Integration**
+### **3. Access Web Dashboard**
+1. Find your ESP32's IP address from the serial monitor output
+2. Open a web browser and navigate to `http://<ESP32_IP>`
+3. The dashboard will automatically load and begin real-time monitoring
+4. All sections update every 5 seconds automatically
+
+### **4. Home Assistant Integration (Optional)**
 1. Add NUT integration in Home Assistant
 2. Configure with:
    - **Host**: ESP32 IP address
@@ -162,7 +222,7 @@ The ESP32 will attempt to connect to WiFi. Monitor the output to see connection 
    - **UPS Name**: VP700ELCD
    - **Username/Password**: (leave empty for no auth)
 
-### **4. Test Connection**
+### **5. Test Connection**
 ```bash
 # Test with upsc
 upsc VP700ELCD@<ESP32_IP>
@@ -171,6 +231,12 @@ upsc VP700ELCD@<ESP32_IP>
 nc <ESP32_IP> 3493
 LIST UPS
 LIST VAR VP700ELCD
+
+# Test API endpoints
+curl http://<ESP32_IP>/api/wifi_status
+curl http://<ESP32_IP>/api/ups_status
+curl http://<ESP32_IP>/api/tcp_status
+curl http://<ESP32_IP>/api/esp_health
 ```
 
 ## 🤝 **Contributing**
@@ -183,14 +249,14 @@ We welcome contributions to improve this project! Areas that need help:
 - **Data Field Validation**: Verify the accuracy of parsed data fields
 
 ### **Feature Development**
-- **Webserver Implementation**: Help build the planned configuration web interface
+- **Dashboard Enhancements**: Add new monitoring sections or improved visualizations
 - **Enhanced Monitoring**: Add more detailed UPS diagnostics and alerts
 - **Performance Optimization**: Improve parsing efficiency and memory usage
 
 ### **Documentation**
 - **Setup Guides**: Create guides for different UPS models and configurations
 - **Troubleshooting**: Document common issues and solutions
-- **API Documentation**: Document the NUT server implementation
+- **API Documentation**: Document the web dashboard API implementation
 
 ### **Testing**
 - **Hardware Testing**: Test with different CyberPower UPS models
@@ -214,7 +280,7 @@ We welcome contributions to improve this project! Areas that need help:
 
 **Original Author**: [ludoux](https://github.com/ludoux) - Created the base ESP32 USB-HID NUT server implementation
 
-**This Fork**: Specialized for CyberPower UPS integration with Home Assistant, featuring improved reliability, accuracy, and maintainability.
+**This Fork**: Specialized for CyberPower UPS integration with Home Assistant, featuring improved reliability, accuracy, maintainability, and a comprehensive web dashboard for real-time monitoring.
 
 ## 📄 **License**
 
@@ -222,6 +288,6 @@ GPL-3.0 (inherited from original project)
 
 ---
 
-**Note**: This firmware is now production-ready for CyberPower VP700ELCD/VP1000ELCD UPS models with Home Assistant integration. The LED status system provides real-time visual feedback for system health monitoring.
+**Note**: This firmware is now production-ready for CyberPower VP700ELCD/VP1000ELCD UPS models with Home Assistant integration and comprehensive web monitoring. The LED status system provides real-time visual feedback, while the web dashboard offers detailed system monitoring and status information.
 
 For detailed technical information, video demos, and original implementation details, please visit the [original repository](https://github.com/ludoux/esp32-nut-server-usbhid).
