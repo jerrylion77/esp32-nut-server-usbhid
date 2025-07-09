@@ -151,6 +151,12 @@ static const char* html_content =
     "                    <span id=\"tcp-status\" class=\"status-value\"></span>\n"
     "                </div>\n"
     "                <div id=\"tcp-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\"></div>\n"
+    "                <div class=\"status-row\">\n"
+    "                    <span id=\"esp-indicator\" class=\"status-indicator\"></span>\n"
+    "                    <span class=\"status-label\">ESP Health:</span>\n"
+    "                    <span id=\"esp-status\" class=\"status-value\"></span>\n"
+    "                </div>\n"
+    "                <div id=\"esp-details\" style=\"margin-left:32px; color:#636e72; font-size:0.97em; margin-bottom:10px;\"></div>\n"
     "            </div>\n"
     "        </div>\n"
     "        <div class=\"footer\">\n"
@@ -260,6 +266,26 @@ static const char* html_content =
     "            }\n"
     "        });\n"
     "    }\n"
+    "    function formatUptime(seconds) {\n"
+    "        if (seconds < 60) {\n"
+    "            return Math.floor(seconds) + ' seconds';\n"
+    "        } else if (seconds < 3600) {\n"
+    "            var minutes = Math.floor(seconds / 60);\n"
+    "            var remainingSeconds = Math.floor(seconds % 60);\n"
+    "            return minutes + ' minutes ' + remainingSeconds + ' seconds';\n"
+    "        } else if (seconds < 86400) {\n"
+    "            var hours = Math.floor(seconds / 3600);\n"
+    "            var minutes = Math.floor((seconds % 3600) / 60);\n"
+    "            var remainingSeconds = Math.floor(seconds % 60);\n"
+    "            return hours + ' hours ' + minutes + ' minutes ' + remainingSeconds + ' seconds';\n"
+    "        } else {\n"
+    "            var days = Math.floor(seconds / 86400);\n"
+    "            var hours = Math.floor((seconds % 86400) / 3600);\n"
+    "            var minutes = Math.floor((seconds % 3600) / 60);\n"
+    "            var remainingSeconds = Math.floor(seconds % 60);\n"
+    "            return days + ' days ' + hours + ' hours ' + minutes + ' minutes ' + remainingSeconds + ' seconds';\n"
+    "        }\n"
+    "    }\n"
     "    function formatTimeAgo(seconds) {\n"
     "        if (seconds < 60) {\n"
     "            return Math.floor(seconds) + ' seconds ago';\n"
@@ -312,13 +338,39 @@ static const char* html_content =
     "            document.getElementById(\"tcp-details\").textContent = '';\n"
     "        });\n"
     "    }\n"
+    "    function updateEspHealthStatus() {\n"
+    "        fetch('/api/esp_health').then(r => r.json()).then(data => {\n"
+    "            var ind = document.getElementById(\"esp-indicator\");\n"
+    "            var statusText = '';\n"
+    "            var color = 'red';\n"
+    "            if (data.memory_percent >= 65) {\n"
+    "                color = 'green';\n"
+    "                statusText = 'Healthy';\n"
+    "            } else if (data.memory_percent >= 30) {\n"
+    "                color = 'yellow';\n"
+    "                statusText = 'Warning';\n"
+    "            } else {\n"
+    "                color = 'red';\n"
+    "                statusText = 'Critical';\n"
+    "            }\n"
+    "            ind.className = 'status-indicator ' + color;\n"
+    "            document.getElementById(\"esp-status\").textContent = statusText;\n"
+    "            var freeKB = Math.floor(data.free_heap / 1024);\n"
+    "            var totalKB = Math.floor(data.total_heap / 1024);\n"
+    "            var memoryText = 'Free Memory: ' + freeKB + 'KB out of ' + totalKB + 'KB (' + data.memory_percent + '% Free)';\n"
+    "            var uptimeText = 'Uptime: ' + formatUptime(data.uptime_seconds);\n"
+    "            document.getElementById(\"esp-details\").innerHTML = memoryText + '<br>' + uptimeText;\n"
+    "        });\n"
+    "    }\n"
     "    initializeSignalBars();\n"
     "    updateWifiStatus();\n"
     "    updateUpsStatus();\n"
     "    updateTcpStatus();\n"
+    "    updateEspHealthStatus();\n"
     "    setInterval(updateWifiStatus, 5000);\n"
     "    setInterval(updateUpsStatus, 5000);\n"
     "    setInterval(updateTcpStatus, 5000);\n"
+    "    setInterval(updateEspHealthStatus, 5000);\n"
     "    </script>\n"
     "</body>\n"
     "</html>";
@@ -420,6 +472,36 @@ static esp_err_t tcp_status_get_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
     ESP_LOGI(TAG, "[REQ %lu] tcp_status_get_handler END", (unsigned long)req_id);
+    return ESP_OK;
+}
+
+// --- ESP Health API Handler ---
+static esp_err_t esp_health_get_handler(httpd_req_t *req)
+{
+    uint32_t req_id = __atomic_add_fetch(&webserver_req_counter, 1, __ATOMIC_SEQ_CST);
+    ESP_LOGI(TAG, "[REQ %lu] esp_health_get_handler START uri=%s", (unsigned long)req_id, req->uri);
+    httpd_resp_set_hdr(req, "Connection", "close");
+    
+    // Get memory information
+    size_t free_heap = esp_get_free_heap_size();
+    
+    // ESP32-S3 has approximately 512KB of SRAM, but actual available heap is less
+    // Using a conservative estimate of 320KB total heap for calculation
+    const size_t total_heap_estimate = 320 * 1024; // 320KB in bytes
+    int memory_percent = (int)((free_heap * 100) / total_heap_estimate);
+    
+    // Get uptime in seconds
+    int64_t uptime_us = esp_timer_get_time();
+    int64_t uptime_seconds = uptime_us / 1000000;
+    
+    char response[256];
+    snprintf(response, sizeof(response),
+        "{\"free_heap\":%u,\"total_heap\":%u,\"memory_percent\":%d,\"uptime_seconds\":%lld}",
+        (unsigned int)free_heap, (unsigned int)total_heap_estimate, memory_percent, (long long)uptime_seconds);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    ESP_LOGI(TAG, "[REQ %lu] esp_health_get_handler END", (unsigned long)req_id);
     return ESP_OK;
 }
 
@@ -698,6 +780,14 @@ esp_err_t webserver_start(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &tcp_status);
+
+        httpd_uri_t esp_health = {
+            .uri = "/api/esp_health",
+            .method = HTTP_GET,
+            .handler = esp_health_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &esp_health);
         
         ESP_LOGI(TAG, "Webserver started on port %d", config.server_port);
         return ESP_OK;
