@@ -213,7 +213,7 @@ static const char* html_content =
     "        statusDiv.className = 'status ' + (isSuccess ? 'success' : 'error');\n"
     "        statusDiv.textContent = message;\n"
     "    }\n"
-    "    const TOTAL_BARS = 20;\n"
+    "    const TOTAL_BARS = 10;\n"
     "    function initializeSignalBars() {\n"
     "        const signalBarsContainer = document.getElementById('wifi-signal-container');\n"
     "        signalBarsContainer.innerHTML = '<span class=\"signal-inline\">Signal: <span class=\"signal-bars\" id=\"signalBars\"></span><span class=\"signal-percentage\" id=\"signalValue\">0%</span></span>';\n"
@@ -321,21 +321,19 @@ static const char* html_content =
     "            var ind = document.getElementById(\"tcp-indicator\");\n"
     "            var statusText = '';\n"
     "            var color = 'red';\n"
+    "            var connectionsText = '';\n"
     "            if (data.running) {\n"
-    "                if (data.connections > 0) {\n"
-    "                    color = 'green';\n"
-    "                    statusText = 'Running (' + data.connections + ' connection' + (data.connections > 1 ? 's' : '') + ')';\n"
-    "                } else {\n"
-    "                    color = 'yellow';\n"
-    "                    statusText = 'Running (0 connections)';\n"
-    "                }\n"
+    "                color = 'green';\n"
+    "                statusText = 'RUNNING';\n"
+    "                connectionsText = 'Connections: ' + data.connections + ' connection' + (data.connections !== 1 ? 's' : '');\n"
     "            } else {\n"
     "                color = 'red';\n"
-    "                statusText = 'Stopped (0 connections)';\n"
+    "                statusText = 'STOPPED';\n"
+    "                connectionsText = 'Connections: 0 connections';\n"
     "            }\n"
     "            ind.className = 'status-indicator ' + color;\n"
     "            document.getElementById(\"tcp-status\").textContent = statusText;\n"
-    "            document.getElementById(\"tcp-details\").textContent = '';\n"
+    "            document.getElementById(\"tcp-details\").textContent = connectionsText;\n"
     "        });\n"
     "    }\n"
     "    function updateEspHealthStatus() {\n"
@@ -345,13 +343,13 @@ static const char* html_content =
     "            var color = 'red';\n"
     "            if (data.memory_percent >= 65) {\n"
     "                color = 'green';\n"
-    "                statusText = 'Healthy';\n"
+    "                statusText = 'HEALTHY';\n"
     "            } else if (data.memory_percent >= 30) {\n"
     "                color = 'yellow';\n"
-    "                statusText = 'Warning';\n"
+    "                statusText = 'WARNING';\n"
     "            } else {\n"
     "                color = 'red';\n"
-    "                statusText = 'Critical';\n"
+    "                statusText = 'CRITICAL';\n"
     "            }\n"
     "            ind.className = 'status-indicator ' + color;\n"
     "            document.getElementById(\"esp-status\").textContent = statusText;\n"
@@ -795,4 +793,21 @@ esp_err_t webserver_start(void)
         ESP_LOGE(TAG, "Failed to start webserver");
         return ESP_FAIL;
     }
+} 
+
+void webserver_restart(void) {
+    ESP_LOGW(TAG, "Restarting webserver due to health check failure");
+    // Stop the webserver if running
+    if (server) {
+        httpd_stop(server);
+        server = NULL;
+    }
+    // Stop and delete the heap log timer if running
+    if (free_heap_log_timer) {
+        esp_timer_stop(free_heap_log_timer);
+        esp_timer_delete(free_heap_log_timer);
+        free_heap_log_timer = NULL;
+    }
+    // Start the webserver again
+    webserver_start();
 } 
