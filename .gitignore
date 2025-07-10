@@ -19,3 +19,7 @@ webserver_monitor.log
 wifi_signal_test_v3.html
 wifi_signal_test_v2.html
 wifi_signal_test.html
+# Project summary prompt file (AI context)
+project_summary_prompt.txt
+# Code analysis and efficiency report
+efficiencies.txt

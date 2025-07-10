@@ -9,4 +9,6 @@ esp_err_t webserver_start(void);
 // Webserver resilience logic: error burst handler
 void handle_accept_error(void);
 
+void webserver_restart(void);
+
 #endif // WEBSERVER_H 

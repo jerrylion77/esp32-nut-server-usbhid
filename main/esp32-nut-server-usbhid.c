@@ -48,6 +48,7 @@
 #include "webserver.h"
 
 #include "esp_http_client.h"
+#include "esp_http_server.h"
 
 // === WiFi NVS Management ===
 #define WIFI_NVS_NAMESPACE "wifi_config"
@@ -447,6 +448,8 @@ bool is_tcp_server_running(void) {
     return (tcp_server_task_handle != NULL && eTaskGetState(tcp_server_task_handle) != eDeleted);
 }
 
+#define TCP_IDLE_TIMEOUT_MS 120000  // 2 minutes
+
 // TCP Server Task
 void tcp_server_task(void *pvParameters)
 {
@@ -457,9 +460,11 @@ void tcp_server_task(void *pvParameters)
     int listen_sock = INVALID_SOCK;
     const size_t max_socks = 4; // Allow up to 4 clients
     static int sock[4];
+    TickType_t last_activity[4];
 
     for (int i = 0; i < max_socks; ++i) {
         sock[i] = INVALID_SOCK;
+        last_activity[i] = xTaskGetTickCount() * portTICK_PERIOD_MS;
     }
 
     int res = getaddrinfo("0.0.0.0", "3493", &hints, &address_info);
@@ -524,6 +529,7 @@ void tcp_server_task(void *pvParameters)
                 ESP_LOGI(TAG, "[sock=%d]: Connection accepted from IP:%s", sock[new_sock_index], get_clients_address(&source_addr));
                 int flags = fcntl(sock[new_sock_index], F_GETFL);
                 fcntl(sock[new_sock_index], F_SETFL, flags | O_NONBLOCK);
+                last_activity[new_sock_index] = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 // Update active connection count
                 active_connections_count = 0;
                 for (int j = 0; j < max_socks; ++j) {
@@ -531,6 +537,7 @@ void tcp_server_task(void *pvParameters)
                 }
             }
         }
+        TickType_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         for (int i = 0; i < max_socks; ++i) {
             if (sock[i] != INVALID_SOCK) {
                 int len = try_receive(TAG, sock[i], rx_buffer, sizeof(rx_buffer));
@@ -700,6 +707,17 @@ void tcp_server_task(void *pvParameters)
                         ESP_LOGE(TAG, "[sock=%d]: Failed to send response: %s", sock[i], strerror(errno));
                         close(sock[i]);
                         sock[i] = INVALID_SOCK;
+                    }
+                }
+                // Idle timeout check
+                if (sock[i] != INVALID_SOCK && (now - last_activity[i]) > TCP_IDLE_TIMEOUT_MS) {
+                    ESP_LOGI(TAG, "[sock=%d]: Idle timeout (%d ms), closing socket", sock[i], (int)(now - last_activity[i]));
+                    close(sock[i]);
+                    sock[i] = INVALID_SOCK;
+                    // Update active connection count
+                    active_connections_count = 0;
+                    for (int j = 0; j < max_socks; ++j) {
+                        if (sock[j] != INVALID_SOCK) active_connections_count++;
                     }
                 }
             }
@@ -1637,7 +1655,6 @@ void connect_to_wifi(void)
 
 // Forward declaration for resilience logic
 void handle_accept_error(void);
-void webserver_restart(void);
 
 // ===================== LOG MONITOR MODULARIZATION =====================
 // To enable the log monitor logic, set ENABLE_LOG_MONITOR to 1 below.
@@ -2046,12 +2063,6 @@ ups_connection_state_t get_ups_state(void) {
 // Getter for last UPS data time
 unsigned int get_ups_last_data_time(void) {
     return ups_last_data_time;
-}
-
-// Add a stub for webserver_restart if not present
-void __attribute__((weak)) webserver_restart(void) {
-    ESP_LOGW("webserver", "Restarting webserver due to health check failure");
-    // ... existing restart logic ...
 }
 
 
