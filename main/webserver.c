@@ -310,10 +310,17 @@ static const char* html_content =
     "        fetch('/api/ups_status').then(r => r.json()).then(data => {\n"
     "            var ind = document.getElementById(\"ups-indicator\");\n"
     "            ind.className = 'status-indicator ' + data.color;\n"
-    "            document.getElementById(\"ups-status\").textContent = data.state;\n"
+    "            var statusText = data.state;\n"
+    "            var detailsText = '';\n"
+    "            if (data.state === 'STALE' && typeof data.stale_duration_ms === 'number') {\n"
+    "                var staleSeconds = Math.floor(data.stale_duration_ms / 1000);\n"
+    "                statusText += ' (for ' + formatUptime(staleSeconds) + ')';\n"
+    "            }\n"
+    "            document.getElementById(\"ups-status\").textContent = statusText;\n"
     "            var seconds = data.ms_since_last / 1000;\n"
     "            var timeAgo = formatTimeAgo(seconds);\n"
-    "            document.getElementById(\"ups-details\").textContent = 'Last message: ' + timeAgo;\n"
+    "            detailsText = 'Last message: ' + timeAgo;\n"
+    "            document.getElementById(\"ups-details\").textContent = detailsText;\n"
     "        });\n"
     "    }\n"
     "    function updateTcpStatus() {\n"
@@ -703,20 +710,28 @@ static esp_err_t ups_status_get_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Connection", "close");
     extern ups_connection_state_t get_ups_state(void);
     extern unsigned int get_ups_last_data_time(void);
-    char response[128];
+    extern uint32_t get_ups_stale_duration_ms(void);
+    char response[160];
     const char *state_str = "UNKNOWN";
     const char *color = "red";
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
     uint32_t ms_since_last = now - get_ups_last_data_time();
+    uint32_t stale_duration = 0;
     switch (get_ups_state()) {
         case 0: state_str = "DISCONNECTED"; color = "red"; break;
         case 1: state_str = "WAITING"; color = "yellow"; break;
         case 2: state_str = "ACTIVE"; color = "green"; break;
-        case 3: state_str = "STALE"; color = "red"; break;
+        case 3: state_str = "STALE"; color = "red"; stale_duration = get_ups_stale_duration_ms(); break;
     }
-    snprintf(response, sizeof(response),
-        "{\"state\":\"%s\",\"color\":\"%s\",\"ms_since_last\":%lu}",
-        state_str, color, (unsigned long)ms_since_last);
+    if (stale_duration > 0) {
+        snprintf(response, sizeof(response),
+            "{\"state\":\"%s\",\"color\":\"%s\",\"ms_since_last\":%lu,\"stale_duration_ms\":%lu}",
+            state_str, color, (unsigned long)ms_since_last, (unsigned long)stale_duration);
+    } else {
+        snprintf(response, sizeof(response),
+            "{\"state\":\"%s\",\"color\":\"%s\",\"ms_since_last\":%lu}",
+            state_str, color, (unsigned long)ms_since_last);
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
     ESP_LOGI(TAG, "[REQ %lu] ups_status_get_handler END", (unsigned long)req_id);

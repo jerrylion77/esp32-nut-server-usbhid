@@ -50,6 +50,11 @@
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 
+#include "nvs.h"
+
+#define NVS_NAMESPACE "ups_recovery"
+#define NVS_KEY "reboot_count"
+
 // === WiFi NVS Management ===
 #define WIFI_NVS_NAMESPACE "wifi_config"
 #define WIFI_SSID_KEY "ssid"
@@ -124,6 +129,37 @@ static const uint32_t PULSE_INTERVAL_MS = 30000;  // 30 seconds
 static const uint32_t PULSE_DURATION_MS = 1000;   // 1 second white flash
 // --- End LED Pulse Tracking Variables ---
 
+// --- STALE state tracking ---
+static uint32_t ups_stale_start_time = 0;  // When STALE state began
+
+// --- NVS Counter Helpers ---
+static esp_err_t get_nvs_reboot_counter(uint32_t *value) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) { *value = 0; return ESP_OK; }
+    err = nvs_get_u32(nvs_handle, NVS_KEY, value);
+    nvs_close(nvs_handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) { *value = 0; return ESP_OK; }
+    return err;
+}
+
+static esp_err_t set_nvs_reboot_counter(uint32_t value) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u32(nvs_handle, NVS_KEY, value);
+    if (err == ESP_OK) err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    return err;
+}
+
+static esp_err_t increment_nvs_reboot_counter(void) {
+    uint32_t value = 0;
+    get_nvs_reboot_counter(&value);
+    value++;
+    return set_nvs_reboot_counter(value);
+}
+
 // Background timer task for UPS data freshness checking
 static void ups_freshness_timer_task(void *pvParameters)
 {
@@ -139,6 +175,7 @@ static void ups_freshness_timer_task(void *pvParameters)
         if (ups_state == UPS_CONNECTED_ACTIVE && time_since_last_data > UPS_DATA_FRESHNESS_TIMEOUT_MS) {
             ups_state = UPS_CONNECTED_STALE;
             ups_available = false;
+            ups_stale_start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;  // Record start time
             ESP_LOGW(TAG, "UPS state: ACTIVE -> STALE (no data for %lu ms)", time_since_last_data);
             update_led_with_pulse();  // Update LED when UPS becomes stale
         }
@@ -163,6 +200,31 @@ static void ups_freshness_timer_task(void *pvParameters)
         if (xTaskGetTickCount() - last_log > 30000 / portTICK_PERIOD_MS) {
             last_log = xTaskGetTickCount();
             ESP_LOGI("ups_timer", "Stack high water mark: %u bytes", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+        }
+        
+        static bool usb_host_restart_attempted = false;
+        static bool esp_restart_attempted = false;
+        uint32_t nvs_reboot_counter = 0;
+        get_nvs_reboot_counter(&nvs_reboot_counter);
+        if (ups_state == UPS_CONNECTED_STALE) {
+            uint32_t stale_ms = get_ups_stale_duration_ms();
+            if (nvs_reboot_counter >= 3) {
+                // Skip all recovery actions, optionally log warning
+            } else {
+                if (stale_ms > 300000 && !usb_host_restart_attempted) {
+                    restart_usb_host();
+                    usb_host_restart_attempted = true;
+                }
+                if (stale_ms > 600000 && !esp_restart_attempted) {
+                    increment_nvs_reboot_counter();
+                    esp_restart_attempted = true;
+                    esp_restart();
+                }
+            }
+        } else {
+            usb_host_restart_attempted = false;
+            esp_restart_attempted = false;
+            set_nvs_reboot_counter(0);
         }
     }
 }
@@ -802,10 +864,12 @@ static void hid_host_generic_report_callback(const uint8_t *const data, const in
     if (ups_state == UPS_DISCONNECTED || ups_state == UPS_CONNECTED_WAITING_DATA) {
         ups_state = UPS_CONNECTED_ACTIVE;
         ups_available = true;
+        ups_stale_start_time = 0;  // Reset STALE timer
         ESP_LOGI(TAG, "UPS state: DISCONNECTED/WAITING -> ACTIVE");
         update_led_with_pulse();  // Update LED with pulse logic when UPS becomes active
     } else if (ups_state == UPS_CONNECTED_STALE) {
         ups_state = UPS_CONNECTED_ACTIVE;
+        ups_stale_start_time = 0;  // Reset STALE timer
         ESP_LOGI(TAG, "UPS state: STALE -> ACTIVE");
         update_led_with_pulse();  // Update LED with pulse logic when UPS becomes active
     } else {
@@ -2064,6 +2128,19 @@ ups_connection_state_t get_ups_state(void) {
 unsigned int get_ups_last_data_time(void) {
     return ups_last_data_time;
 }
+
+// Getter for STALE duration in ms
+uint32_t get_ups_stale_duration_ms(void) {
+    if (ups_state != UPS_CONNECTED_STALE) {
+        return 0;  // Not stale
+    }
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    return now - ups_stale_start_time;
+}
+
+// Function prototypes for resilience logic
+uint32_t get_ups_stale_duration_ms(void);
+void restart_usb_host(void);
 
 
 
