@@ -52,6 +52,10 @@
 
 #include "nvs.h"
 
+// Function prototypes for resilience logic
+uint32_t get_ups_stale_duration_ms(void);
+void restart_usb_host(void);
+
 #define NVS_NAMESPACE "ups_recovery"
 #define NVS_KEY "reboot_count"
 
@@ -202,7 +206,6 @@ static void ups_freshness_timer_task(void *pvParameters)
             ESP_LOGI("ups_timer", "Stack high water mark: %u bytes", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
         }
         
-        static bool usb_host_restart_attempted = false;
         static bool esp_restart_attempted = false;
         uint32_t nvs_reboot_counter = 0;
         get_nvs_reboot_counter(&nvs_reboot_counter);
@@ -211,18 +214,13 @@ static void ups_freshness_timer_task(void *pvParameters)
             if (nvs_reboot_counter >= 3) {
                 // Skip all recovery actions, optionally log warning
             } else {
-                if (stale_ms > 300000 && !usb_host_restart_attempted) {
-                    restart_usb_host();
-                    usb_host_restart_attempted = true;
-                }
-                if (stale_ms > 600000 && !esp_restart_attempted) {
+                if (stale_ms > 300000 && !esp_restart_attempted) {
                     increment_nvs_reboot_counter();
                     esp_restart_attempted = true;
                     esp_restart();
                 }
             }
         } else {
-            usb_host_restart_attempted = false;
             esp_restart_attempted = false;
             set_nvs_reboot_counter(0);
         }
@@ -2139,8 +2137,8 @@ uint32_t get_ups_stale_duration_ms(void) {
 }
 
 // Function prototypes for resilience logic
-uint32_t get_ups_stale_duration_ms(void);
-void restart_usb_host(void);
+//uint32_t get_ups_stale_duration_ms(void);
+//void restart_usb_host(void);
 
 
 
