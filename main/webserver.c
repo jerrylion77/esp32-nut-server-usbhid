@@ -34,7 +34,7 @@ static volatile uint32_t webserver_req_counter = 0;
 // --- Webserver resilience logic state ---
 #define ACCEPT_ERROR_THRESHOLD 10
 #define ACCEPT_ERROR_WINDOW_MS 10000
-#define FREE_HEAP_CRITICAL (16 * 1024)
+#define FREE_HEAP_CRITICAL (65 * 1024)
 #define SELF_CHECK_URL "http://127.0.0.1/api/wifi_status"
 #define FREE_HEAP_LOG_INTERVAL_MS 20000
 
