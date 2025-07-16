@@ -136,6 +136,38 @@ static const uint32_t PULSE_DURATION_MS = 1000;   // 1 second white flash
 // --- STALE state tracking ---
 static uint32_t ups_stale_start_time = 0;  // When STALE state began
 
+// --- DISCONNECTED state tracking ---
+static uint32_t ups_disconnected_start_time = 0;  // When DISCONNECTED state began
+
+#define NVS_DISCONNECTED_KEY "disconnected_reboot_count"
+
+static esp_err_t get_nvs_disconnected_reboot_counter(uint32_t *value) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) { *value = 0; return ESP_OK; }
+    err = nvs_get_u32(nvs_handle, NVS_DISCONNECTED_KEY, value);
+    nvs_close(nvs_handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) { *value = 0; return ESP_OK; }
+    return err;
+}
+
+static esp_err_t set_nvs_disconnected_reboot_counter(uint32_t value) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u32(nvs_handle, NVS_DISCONNECTED_KEY, value);
+    if (err == ESP_OK) err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    return err;
+}
+
+static esp_err_t increment_nvs_disconnected_reboot_counter(void) {
+    uint32_t value = 0;
+    get_nvs_disconnected_reboot_counter(&value);
+    value++;
+    return set_nvs_disconnected_reboot_counter(value);
+}
+
 // --- NVS Counter Helpers ---
 static esp_err_t get_nvs_reboot_counter(uint32_t *value) {
     nvs_handle_t nvs_handle;
@@ -174,6 +206,30 @@ static void ups_freshness_timer_task(void *pvParameters)
     while (1) {
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         uint32_t time_since_last_data = current_time - ups_last_data_time;
+        // --- DISCONNECTED logic ---
+        static bool esp_disconnected_restart_attempted = false;
+        uint32_t nvs_disconnected_reboot_counter = 0;
+        uint32_t nvs_stale_reboot_counter = 0;
+        get_nvs_disconnected_reboot_counter(&nvs_disconnected_reboot_counter);
+        get_nvs_reboot_counter(&nvs_stale_reboot_counter);
+        if (ups_state == UPS_DISCONNECTED) {
+            if (ups_disconnected_start_time == 0) {
+                ups_disconnected_start_time = current_time;
+            }
+            uint32_t disconnected_ms = current_time - ups_disconnected_start_time;
+            if (nvs_disconnected_reboot_counter < 3) {
+                if (disconnected_ms > 300000 && !esp_disconnected_restart_attempted) {
+                    increment_nvs_disconnected_reboot_counter();
+                    esp_disconnected_restart_attempted = true;
+                    ESP_LOGW(TAG, "UPS state: DISCONNECTED for >5min, rebooting (attempt %lu)", (unsigned long)(nvs_disconnected_reboot_counter+1));
+                    esp_restart();
+                }
+            }
+        } else {
+            ups_disconnected_start_time = 0;
+            esp_disconnected_restart_attempted = false;
+            set_nvs_disconnected_reboot_counter(0);
+        }
         
         // Check if UPS data is stale (no data for more than 10 seconds)
         if (ups_state == UPS_CONNECTED_ACTIVE && time_since_last_data > UPS_DATA_FRESHNESS_TIMEOUT_MS) {
@@ -863,11 +919,15 @@ static void hid_host_generic_report_callback(const uint8_t *const data, const in
         ups_state = UPS_CONNECTED_ACTIVE;
         ups_available = true;
         ups_stale_start_time = 0;  // Reset STALE timer
+        ups_disconnected_start_time = 0; // Reset DISCONNECTED timer
+        set_nvs_disconnected_reboot_counter(0); // Reset DISCONNECTED reboot counter
         ESP_LOGI(TAG, "UPS state: DISCONNECTED/WAITING -> ACTIVE");
         update_led_with_pulse();  // Update LED with pulse logic when UPS becomes active
     } else if (ups_state == UPS_CONNECTED_STALE) {
         ups_state = UPS_CONNECTED_ACTIVE;
         ups_stale_start_time = 0;  // Reset STALE timer
+        ups_disconnected_start_time = 0; // Reset DISCONNECTED timer
+        set_nvs_disconnected_reboot_counter(0); // Reset DISCONNECTED reboot counter
         ESP_LOGI(TAG, "UPS state: STALE -> ACTIVE");
         update_led_with_pulse();  // Update LED with pulse logic when UPS becomes active
     } else {
